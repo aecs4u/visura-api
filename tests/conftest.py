@@ -1,9 +1,26 @@
+"""Test configuration — adds visura_api/ to sys.path and provides shared fixtures."""
+
 import importlib
 import logging
+import os
 import sys
 import types
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Path setup: add visura_api/ so bare imports like "from models import ..."
+# resolve to the package source, not the (deleted) root-level modules.
+# ---------------------------------------------------------------------------
+
+_visura_api_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "visura_api")
+if _visura_api_dir not in sys.path:
+    sys.path.insert(0, _visura_api_dir)
+
+
+# ---------------------------------------------------------------------------
+# Stub heavy optional dependencies that may not be installed in CI
+# ---------------------------------------------------------------------------
 
 
 def _install_test_stubs() -> None:
@@ -114,24 +131,49 @@ def _install_test_stubs() -> None:
 _install_test_stubs()
 
 
+# ---------------------------------------------------------------------------
+# Async noop helpers for DB stub patching
+# ---------------------------------------------------------------------------
+
+
+async def _noop(*_args, **_kwargs):
+    return None
+
+
+async def _zero(*_args, **_kwargs):
+    return 0
+
+
+async def _empty_list(*_args, **_kwargs):
+    return []
+
+
+async def _db_stats(*_args, **_kwargs):
+    return {"total_requests": 0, "total_responses": 0, "successful": 0, "failed": 0}
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
 @pytest.fixture()
 def main_module(monkeypatch):
-    import importlib
-
+    """Import main.py and patch all DB functions to noops."""
     module = importlib.import_module("main")
+    services_mod = importlib.import_module("services")
+    routes_mod = importlib.import_module("routes")
 
-    async def _noop(*_args, **_kwargs):
-        return None
+    # Stub DB functions on the modules that actually import them
+    monkeypatch.setattr(services_mod, "save_request", _noop, raising=False)
+    monkeypatch.setattr(services_mod, "save_requests_batch", _noop, raising=False)
+    monkeypatch.setattr(services_mod, "save_response", _noop, raising=False)
+    monkeypatch.setattr(services_mod, "cleanup_old_responses", _zero, raising=False)
+    monkeypatch.setattr(services_mod, "load_stored_response", _noop, raising=False)
+    monkeypatch.setattr(routes_mod, "find_responses", _empty_list, raising=False)
+    monkeypatch.setattr(routes_mod, "count_responses", _db_stats, raising=False)
 
-    async def _zero(*_args, **_kwargs):
-        return 0
-
-    async def _empty_list(*_args, **_kwargs):
-        return []
-
-    async def _db_stats(*_args, **_kwargs):
-        return {"total_requests": 0, "total_responses": 0, "successful": 0, "failed": 0}
-
+    # Also patch on main for any tests that check main_module.* directly
     monkeypatch.setattr(module, "save_request", _noop, raising=False)
     monkeypatch.setattr(module, "save_requests_batch", _noop, raising=False)
     monkeypatch.setattr(module, "save_response", _noop, raising=False)

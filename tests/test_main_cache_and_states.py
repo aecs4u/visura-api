@@ -328,7 +328,9 @@ async def test_get_response_loads_from_database_when_not_cached(monkeypatch, mai
             "created_at": datetime.now().isoformat(),
         }
 
-    monkeypatch.setattr(main_module, "load_stored_response", fake_load, raising=False)
+    import services as services_mod
+
+    monkeypatch.setattr(services_mod, "load_stored_response", fake_load, raising=False)
 
     response = await service.get_response(request_id)
 
@@ -340,6 +342,8 @@ async def test_get_response_loads_from_database_when_not_cached(monkeypatch, mai
 
 @pytest.mark.asyncio
 async def test_get_response_marks_expired_for_old_database_record(monkeypatch, main_module):
+    import services as services_mod
+
     service = main_module.VisuraService()
     service.response_ttl_seconds = 1
     request_id = "req_F_db_old"
@@ -354,7 +358,7 @@ async def test_get_response_marks_expired_for_old_database_record(monkeypatch, m
             "created_at": (datetime.now() - timedelta(seconds=2)).isoformat(),
         }
 
-    monkeypatch.setattr(main_module, "load_stored_response", fake_load, raising=False)
+    monkeypatch.setattr(services_mod, "load_stored_response", fake_load, raising=False)
 
     response = await service.get_response(request_id)
 
@@ -365,6 +369,8 @@ async def test_get_response_marks_expired_for_old_database_record(monkeypatch, m
 
 @pytest.mark.asyncio
 async def test_add_request_returns_runtime_error_when_persistence_fails(monkeypatch, main_module):
+    import services as services_mod
+
     service = main_module.VisuraService()
     service.processing = True
     request = main_module.VisuraRequest(
@@ -379,7 +385,7 @@ async def test_add_request_returns_runtime_error_when_persistence_fails(monkeypa
     async def failing_save(*_args, **_kwargs):
         raise RuntimeError("db unavailable")
 
-    monkeypatch.setattr(main_module, "save_request", failing_save, raising=False)
+    monkeypatch.setattr(services_mod, "save_request", failing_save, raising=False)
 
     with pytest.raises(RuntimeError):
         await service.add_request(request)
