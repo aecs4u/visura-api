@@ -266,12 +266,12 @@
                 <div class="card-body p-2">
                     {# Category radio toggle #}
                     <div class="btn-group w-100 mb-3" role="group" aria-label="Query category">
-                        <input type="radio" class="btn-check" name="query-category" id="cat-single" value="single" checked
+                        <input type="radio" class="btn-check" name="query-category" id="cat-single" value="single" checked autocomplete="off"
                                onchange="toggleQueryCategory('single')">
-                        <label class="btn btn-outline-primary btn-sm" for="cat-single">
+                        <label class="btn btn-outline-primary btn-sm active" for="cat-single">
                             <i class="fas fa-bolt me-1"></i>Single Step
                         </label>
-                        <input type="radio" class="btn-check" name="query-category" id="cat-workflow" value="workflow"
+                        <input type="radio" class="btn-check" name="query-category" id="cat-workflow" value="workflow" autocomplete="off"
                                onchange="toggleQueryCategory('workflow')">
                         <label class="btn btn-outline-primary btn-sm" for="cat-workflow">
                             <i class="fas fa-project-diagram me-1"></i>Multi Steps
