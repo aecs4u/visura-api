@@ -44,9 +44,21 @@
                        data-path="{{ form_group.endpoints[0].path }}">
                 {% endif %}
 
+                {# Workflow: show flowchart for selected preset #}
+                {% if form_group.id == 'workflow' %}
+                <div id="workflow-flowchart" class="mb-4">
+                    <div class="card bg-light">
+                        <div class="card-body text-center">
+                            <p class="text-muted mb-2"><i class="fas fa-project-diagram me-1"></i>Select a preset to see its flowchart</p>
+                            <div id="workflow-svg-container" style="max-width: 500px; margin: 0 auto;"></div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 <div class="row g-3">
                     {% for param in form_group.params %}
-                    <div class="col-md-6">
+                    <div class="{% if param.input_type == 'textarea' %}col-12{% else %}col-md-6{% endif %}">
                         <label for="param-{{ form_group.id }}-{{ param.name }}" class="form-label">
                             {{ param.label }}
                             {% if param.required %}<span class="text-danger">*</span>{% endif %}
@@ -67,6 +79,17 @@
                                   placeholder="{{ param.placeholder }}"
                                   rows="6"
                                   {% if param.required %}required{% endif %}>{{ param.example or '' }}</textarea>
+                        {# Batch: add file upload option below textarea #}
+                        {% if param.name == 'csv_data' %}
+                        <div class="mt-2">
+                            <label class="btn btn-outline-secondary btn-sm">
+                                <i class="fas fa-file-upload me-1"></i>Or upload CSV file
+                                <input type="file" accept=".csv,.txt" class="d-none"
+                                       onchange="loadCSVFile(this, '{{ form_group.id }}', '{{ param.name }}')">
+                            </label>
+                            <span id="file-name-{{ form_group.id }}" class="ms-2 text-muted small"></span>
+                        </div>
+                        {% endif %}
                         {% else %}
                         <input type="{{ param.input_type }}" class="form-control"
                                id="param-{{ form_group.id }}-{{ param.name }}"

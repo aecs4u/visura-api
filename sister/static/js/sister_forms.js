@@ -10,9 +10,37 @@
   const POLL_INTERVAL = 3000;  // ms
   const POLL_TIMEOUT = 120000;  // ms
 
+  // Available workflow flowcharts
+  const WORKFLOW_PRESETS = ['due-diligence', 'patrimonio', 'fondiario', 'aziendale', 'storico'];
+
   document.querySelectorAll('.sister-form').forEach(form => {
     form.addEventListener('submit', handleFormSubmit);
   });
+
+  // --- Workflow flowchart: show SVG when preset changes ---
+  const presetSelect = document.getElementById('param-workflow-preset');
+  if (presetSelect) {
+    presetSelect.addEventListener('change', updateWorkflowFlowchart);
+    // Load initial
+    updateWorkflowFlowchart();
+  }
+
+  function updateWorkflowFlowchart() {
+    const container = document.getElementById('workflow-svg-container');
+    if (!container || !presetSelect) return;
+    const preset = presetSelect.value;
+    if (WORKFLOW_PRESETS.includes(preset)) {
+      container.innerHTML = '<div class="text-center py-2"><i class="fas fa-spinner fa-spin"></i></div>';
+      fetch('/static/images/workflows/' + preset + '.svg')
+        .then(r => r.ok ? r.text() : '')
+        .then(svg => {
+          container.innerHTML = svg || '<p class="text-muted">Flowchart not available</p>';
+        })
+        .catch(() => { container.innerHTML = '<p class="text-muted">Flowchart not available</p>'; });
+    } else {
+      container.innerHTML = '<p class="text-muted">Select a preset to see its flowchart</p>';
+    }
+  }
 
   document.querySelectorAll('.btn-copy-response').forEach(btn => {
     btn.addEventListener('click', function () {
@@ -137,5 +165,23 @@
       }
     }
   }
+
+  // --- CSV file loader for batch form ---
+  window.loadCSVFile = function(input, groupId, paramName) {
+    const file = input.files[0];
+    if (!file) return;
+
+    const nameSpan = document.getElementById('file-name-' + groupId);
+    if (nameSpan) nameSpan.textContent = file.name;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const textarea = document.getElementById('param-' + groupId + '-' + paramName);
+      if (textarea) {
+        textarea.value = e.target.result;
+      }
+    };
+    reader.readAsText(file);
+  };
 
 })();
