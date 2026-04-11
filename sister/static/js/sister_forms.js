@@ -1035,26 +1035,50 @@
         fields.forEach(f => {
           columns.push({
             title: toTitleCase(f), field: f, editor: 'input', headerFilter: 'input',
-            formatter: function(cell) {
+            formatter: 'html',
+            formatterParams: {},
+            accessorDownload: function(value) { return value; },
+            cellRendered: function(cell) {
               const errs = cell.getRow().getData()._errors || {};
               const val = cell.getValue() || '';
-              if (errs[f]) return '<span class="text-danger" title="' + escapeHtml(errs[f]) + '"><i class="fas fa-exclamation-circle me-1"></i>' + escapeHtml(val || '—') + '</span>';
-              return escapeHtml(val);
+              if (errs[f]) {
+                cell.getElement().innerHTML = '<span class="text-danger" title="' + escapeHtml(errs[f]) + '">' +
+                  '<i class="fas fa-exclamation-circle me-1"></i>' + escapeHtml(val || '—') + '</span>';
+                cell.getElement().style.backgroundColor = '#fee2e2';
+              }
             },
           });
         });
         columns.push({
-          title: 'Status', field: '_status', width: 90, hozAlign: 'center', headerSort: false,
-          formatter: function(cell) {
-            return cell.getRow().getData()._hasErrors
-              ? '<span class="badge bg-danger">Error</span>'
-              : '<span class="badge bg-success">OK</span>';
+          title: 'Errors', field: '_errorText', minWidth: 200, headerSort: false,
+          formatter: 'html',
+          accessorData: function(value, data) {
+            const errs = data._errors || {};
+            const msgs = Object.entries(errs).map(function(e) { return '<b>' + toTitleCase(e[0]) + '</b>: ' + escapeHtml(e[1]); });
+            return msgs.join('<br>');
           },
         });
+        columns.push({
+          title: 'Status', field: '_status', width: 90, hozAlign: 'center', headerSort: false,
+          formatter: 'html',
+        });
 
-        const data = batchWizard._validatedRows.map(r => ({
-          _row: r.index, ...r.data, _errors: r.errors, _hasErrors: r.hasErrors,
-        }));
+        const data = batchWizard._validatedRows.map(r => {
+          // Pre-render error text and status badge
+          const errMsgs = Object.entries(r.errors || {}).map(function(e) {
+            return '<b>' + toTitleCase(e[0]) + '</b>: ' + escapeHtml(e[1]);
+          });
+          return {
+            _row: r.index,
+            ...r.data,
+            _errors: r.errors,
+            _hasErrors: r.hasErrors,
+            _errorText: errMsgs.length ? errMsgs.join('<br>') : '',
+            _status: r.hasErrors
+              ? '<span class="badge bg-danger">Error</span>'
+              : '<span class="badge bg-success">OK</span>',
+          };
+        });
 
         tableEl.innerHTML = '';
         tableEl.className = '';
