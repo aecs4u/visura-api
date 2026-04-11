@@ -346,6 +346,72 @@ SINGLE_STEP_GROUPS: list[FormGroup] = [
     ),
 
     FormGroup(
+        id="ispezione-ipotecaria",
+        name="Ispezione Ipotecaria",
+        description="Paid property inspection (search by property, person, company, or note). Incurs a cost per query.",
+        icon="fa-file-invoice-dollar",
+        color="danger",
+        category="single",
+        params=[
+            EndpointParam(
+                name="tipo_ricerca", label="Search Type", placeholder="Select search type",
+                input_type="select", required=True,
+                options=[
+                    ("immobile", "Property (Immobile)"),
+                    ("persona_fisica", "Person (Persona Fisica)"),
+                    ("persona_giuridica", "Company (Persona Giuridica)"),
+                    ("nota", "Note (Nota)"),
+                ],
+                help_text="Type of inspection search",
+            ),
+            _PROVINCIA,
+            EndpointParam(
+                name="comune", label="Municipality", placeholder="e.g. ROMA",
+                required=False, help_text="Municipality name (for immobile search)",
+            ),
+            _TIPO_CATASTO_TF,
+            EndpointParam(
+                name="codice_fiscale", label="Codice Fiscale", placeholder="e.g. RSSMRI85E28H501E",
+                required=False, help_text="For persona_fisica search",
+            ),
+            EndpointParam(
+                name="identificativo", label="P.IVA / Company", placeholder="e.g. 02471840997",
+                required=False, help_text="For persona_giuridica search",
+            ),
+            EndpointParam(
+                name="foglio", label="Sheet (Foglio)", placeholder="e.g. 100",
+                required=False, help_text="For immobile search",
+            ),
+            EndpointParam(
+                name="particella", label="Parcel (Particella)", placeholder="e.g. 50",
+                required=False, help_text="For immobile search",
+            ),
+            EndpointParam(
+                name="numero_nota", label="Note Number", placeholder="e.g. 12345",
+                required=False, help_text="For nota search",
+            ),
+            EndpointParam(
+                name="anno_nota", label="Note Year", placeholder="e.g. 2024",
+                required=False, help_text="For nota search",
+            ),
+            EndpointParam(
+                name="auto_confirm", label="Auto-confirm cost", placeholder="",
+                input_type="select", required=False,
+                options=[("false", "No — show cost first"), ("true", "Yes — auto-approve")],
+                help_text="WARNING: Setting to Yes will automatically confirm the cost and charge your account.",
+            ),
+        ],
+        endpoints=[
+            EndpointOption(
+                id="ispezione-ipotecaria", name="Ispezione Ipotecaria",
+                path="/visura/ispezione-ipotecaria", method="POST",
+                description="Paid property inspection (requires cost confirmation)",
+            ),
+        ],
+        default_endpoint_id="ispezione-ipotecaria",
+    ),
+
+    FormGroup(
         id="riepilogo",
         name="Query Summary",
         description="View your SISTER query history and pending requests.",
@@ -368,20 +434,47 @@ SINGLE_STEP_GROUPS: list[FormGroup] = [
 # Workflow (multi-step) form groups
 # ---------------------------------------------------------------------------
 
+_PRESET_HIDDEN = lambda preset_name: EndpointParam(
+    name="preset", label="", placeholder="",
+    input_type="hidden", required=True,
+    example=preset_name,
+)
+
+_WORKFLOW_DEPTH = EndpointParam(
+    name="depth", label="Depth", placeholder="Select depth",
+    input_type="select", required=False,
+    options=[("light", "Light — core steps only"), ("standard", "Standard — with enrichment"), ("deep", "Deep — owner expansion + paid")],
+    help_text="Controls which steps run. Deep adds owner expansion and paid inspections.",
+)
+
+_WORKFLOW_PAID = EndpointParam(
+    name="include_paid_steps", label="Include Paid Steps", placeholder="",
+    input_type="select", required=False,
+    options=[("false", "No"), ("true", "Yes — include paid inspections")],
+    help_text="Enable paid ispezione ipotecaria steps (requires Deep depth).",
+)
+
+_WORKFLOW_CONFIRM = EndpointParam(
+    name="auto_confirm", label="Auto-confirm Cost", placeholder="",
+    input_type="select", required=False,
+    options=[("false", "No — show cost first"), ("true", "Yes — auto-approve")],
+    help_text="WARNING: Setting to Yes will automatically confirm paid service costs.",
+)
+
 WORKFLOW_GROUPS: list[FormGroup] = [
     FormGroup(
         id="wf-due-diligence",
         name="Due Diligence",
-        description="Real estate due diligence: search → intestati → ispezioni",
+        description="Real estate due diligence: search → intestati → ispezioni → elaborato planimetrico. Optional: owner expansion, ipotecaria.",
         icon="fa-file-contract",
         color="primary",
         category="workflow",
         flowchart="due-diligence",
-        params=[_PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO, _SEZIONE],
+        params=[_PRESET_HIDDEN("due-diligence"), _PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO, _SEZIONE, _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM],
         endpoints=[EndpointOption(
             id="workflow-due-diligence", name="Due Diligence",
-            path="/visura", method="POST",
-            description="search → intestati → ispezioni",
+            path="/visura/workflow", method="POST",
+            description="search → intestati → ispezioni → elaborato planimetrico",
         )],
         default_endpoint_id="workflow-due-diligence",
     ),
@@ -389,20 +482,22 @@ WORKFLOW_GROUPS: list[FormGroup] = [
     FormGroup(
         id="wf-patrimonio",
         name="Asset Investigation",
-        description="Find all properties owned by a person across Italy.",
+        description="Asset investigation: soggetto → drill-down intestati → address lookup. Optional: owner expansion, ipotecaria.",
         icon="fa-search-dollar",
         color="info",
         category="workflow",
         flowchart="patrimonio",
         params=[
+            _PRESET_HIDDEN("patrimonio"),
             EndpointParam(name="codice_fiscale", label="Codice Fiscale",
                           placeholder="e.g. RSSMRI85E28H501E", example="RSSMRI85E28H501E"),
             _TIPO_CATASTO_TFE, _PROVINCIA_OPT,
+            _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM,
         ],
         endpoints=[EndpointOption(
             id="workflow-patrimonio", name="Asset Investigation",
-            path="/visura/soggetto", method="POST",
-            description="soggetto (nazionale) → drill-down",
+            path="/visura/workflow", method="POST",
+            description="soggetto → drill-down intestati per property",
         )],
         default_endpoint_id="workflow-patrimonio",
     ),
@@ -410,16 +505,16 @@ WORKFLOW_GROUPS: list[FormGroup] = [
     FormGroup(
         id="wf-fondiario",
         name="Land Survey",
-        description="Complete cadastral data for a zone: elenco → mappa → fiduciali → originali",
+        description="Land survey: elenco → mappa → export mappa → fiduciali → originali → elaborato planimetrico.",
         icon="fa-mountain",
         color="success",
         category="workflow",
         flowchart="fondiario",
-        params=[_PROVINCIA, _COMUNE, _FOGLIO_OPT, _TIPO_CATASTO_TF],
+        params=[_PRESET_HIDDEN("fondiario"), _PROVINCIA, _COMUNE, _FOGLIO_OPT, _TIPO_CATASTO_TF, _WORKFLOW_DEPTH],
         endpoints=[EndpointOption(
             id="workflow-fondiario", name="Land Survey",
-            path="/visura/elenco-immobili", method="POST",
-            description="elenco → mappa → fiduciali → originali",
+            path="/visura/workflow", method="POST",
+            description="elenco → mappa → export mappa → fiduciali → originali → elaborato",
         )],
         default_endpoint_id="workflow-fondiario",
     ),
@@ -427,20 +522,22 @@ WORKFLOW_GROUPS: list[FormGroup] = [
     FormGroup(
         id="wf-aziendale",
         name="Corporate Audit",
-        description="Find all properties owned by a company.",
+        description="Corporate audit: azienda → drill-down intestati → address lookup. Optional: owner expansion, ipotecaria.",
         icon="fa-briefcase",
         color="warning",
         category="workflow",
         flowchart="aziendale",
         params=[
+            _PRESET_HIDDEN("aziendale"),
             EndpointParam(name="identificativo", label="P.IVA / Company",
                           placeholder="e.g. 02471840997", example="02471840997"),
             _TIPO_CATASTO_TFE, _PROVINCIA_OPT,
+            _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM,
         ],
         endpoints=[EndpointOption(
             id="workflow-aziendale", name="Corporate Audit",
-            path="/visura/persona-giuridica", method="POST",
-            description="azienda → drill-down",
+            path="/visura/workflow", method="POST",
+            description="azienda → drill-down intestati per property",
         )],
         default_endpoint_id="workflow-aziendale",
     ),
@@ -448,18 +545,68 @@ WORKFLOW_GROUPS: list[FormGroup] = [
     FormGroup(
         id="wf-storico",
         name="Parcel History",
-        description="Full historical record: search → intestati → nota → ispezioni → originali",
+        description="Parcel history: search → intestati → nota → ispezioni → originali → elaborato planimetrico. Optional: owner expansion, ipotecaria.",
         icon="fa-history",
         color="dark",
         category="workflow",
         flowchart="storico",
-        params=[_PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO],
+        params=[_PRESET_HIDDEN("storico"), _PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO, _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM],
         endpoints=[EndpointOption(
             id="workflow-storico", name="Parcel History",
-            path="/visura", method="POST",
-            description="search → intestati → nota → ispezioni → originali",
+            path="/visura/workflow", method="POST",
+            description="search → intestati → nota → ispezioni → originali → elaborato",
         )],
         default_endpoint_id="workflow-storico",
+    ),
+
+    FormGroup(
+        id="wf-indirizzo",
+        name="Address Lookup",
+        description="Address lookup: indirizzo → search → intestati. Optional: owner expansion.",
+        icon="fa-map-marker-alt",
+        color="danger",
+        category="workflow",
+        flowchart="indirizzo",
+        params=[
+            _PRESET_HIDDEN("indirizzo"), _PROVINCIA, _COMUNE,
+            EndpointParam(
+                name="indirizzo", label="Address",
+                placeholder="e.g. VIA ROMA",
+                help_text="Street name (partial match supported)",
+                example="VIA ROMA",
+            ),
+            _TIPO_CATASTO, _WORKFLOW_DEPTH,
+        ],
+        endpoints=[EndpointOption(
+            id="workflow-indirizzo", name="Address Lookup",
+            path="/visura/workflow", method="POST",
+            description="indirizzo → search → intestati",
+        )],
+        default_endpoint_id="workflow-indirizzo",
+    ),
+
+    FormGroup(
+        id="wf-cross-reference",
+        name="Cross-Reference",
+        description="Cross-reference: compare person + company property overlap.",
+        icon="fa-exchange-alt",
+        color="dark",
+        category="workflow",
+        flowchart="cross-reference",
+        params=[
+            _PRESET_HIDDEN("cross-reference"),
+            EndpointParam(name="codice_fiscale", label="Codice Fiscale",
+                          placeholder="e.g. RSSMRI85E28H501E", example="RSSMRI85E28H501E"),
+            EndpointParam(name="identificativo", label="P.IVA / Company",
+                          placeholder="e.g. 02471840997", example="02471840997"),
+            _TIPO_CATASTO_TFE, _PROVINCIA_OPT, _WORKFLOW_DEPTH,
+        ],
+        endpoints=[EndpointOption(
+            id="workflow-cross-reference", name="Cross-Reference",
+            path="/visura/workflow", method="POST",
+            description="soggetto + azienda → cross-property overlap",
+        )],
+        default_endpoint_id="workflow-cross-reference",
     ),
 ]
 

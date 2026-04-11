@@ -816,45 +816,201 @@ def richieste_sister(
     _generic_search_command("richieste", "", client, wait, output)
 
 
+# -- Ispezioni Ipotecarie (paid service) --------------------------------------
+
+
+def _ipotecaria_command(
+    tipo_ricerca: str,
+    provincia: str,
+    client: VisuraClient,
+    wait: bool,
+    output: Optional[str],
+    yes: bool = False,
+    comune: Optional[str] = None,
+    tipo_catasto: Optional[str] = None,
+    codice_fiscale: Optional[str] = None,
+    identificativo: Optional[str] = None,
+    foglio: Optional[str] = None,
+    particella: Optional[str] = None,
+    numero_nota: Optional[str] = None,
+    anno_nota: Optional[str] = None,
+):
+    """Shared logic for ispezione ipotecaria CLI commands."""
+    if not yes:
+        console.print(
+            "[bold yellow]WARNING:[/bold yellow] Ispezioni Ipotecarie is a paid service. "
+            "Each query may incur a cost.\n"
+            "Use [bold]--yes[/bold] to auto-confirm cost."
+        )
+
+    try:
+        result = asyncio.run(
+            client.ispezione_ipotecaria(
+                tipo_ricerca=tipo_ricerca,
+                provincia=provincia,
+                comune=comune,
+                tipo_catasto=tipo_catasto,
+                codice_fiscale=codice_fiscale,
+                identificativo=identificativo,
+                foglio=foglio,
+                particella=particella,
+                numero_nota=numero_nota,
+                anno_nota=anno_nota,
+                auto_confirm=yes,
+            )
+        )
+    except VisuraAPIError as e:
+        _handle_api_error(e)
+        return
+
+    request_id = result.get("request_id", "")
+    console.print(f"[bold green]Request submitted[/bold green] (ispezione ipotecaria — {tipo_ricerca})")
+    console.print(f"  ID: [cyan]{request_id}[/cyan]")
+
+    if not wait:
+        console.print(f"[dim]Poll result with:[/dim]\n  [bold]sister get {request_id}[/bold]")
+        if output:
+            _write_output(result, output)
+        return
+
+    console.print(f"\n[dim]Waiting for {request_id}...[/dim]")
+    try:
+        res = asyncio.run(client.wait_for_result(request_id))
+        # Show cost info if present
+        data = res.get("data", {})
+        if isinstance(data, dict) and data.get("cost"):
+            cost = data["cost"]
+            console.print(f"[yellow]Cost: {cost.get('text', 'N/A')} (€{cost.get('value', 0):.2f})[/yellow]")
+            if not data.get("confirmed"):
+                console.print("[red]Cost not confirmed. Use --yes to auto-confirm.[/red]")
+        _print_result(res)
+        if output:
+            _write_output(res, output)
+    except TimeoutError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+    except VisuraAPIError as e:
+        _handle_api_error(e)
+
+
+@query_app.command("ipotecaria-immobile")
+def ipotecaria_immobile(
+    provincia: str = typer.Option(..., "--provincia", "-P", help="Province name"),
+    comune: Optional[str] = typer.Option(None, "--comune", "-C", help="Municipality name"),
+    foglio: Optional[str] = typer.Option(None, "--foglio", "-F", help="Sheet number"),
+    particella: Optional[str] = typer.Option(None, "--particella", "-p", help="Parcel number"),
+    tipo_catasto: Optional[str] = typer.Option(None, "--tipo-catasto", "-t", help="'T' = Terreni, 'F' = Fabbricati"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-confirm cost without prompting"),
+):
+    """Ispezione Ipotecaria by property (immobile). PAID SERVICE."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/ispezione-ipotecaria (immobile)")
+        return
+    _ipotecaria_command(
+        "immobile", provincia, client, wait, output, yes=yes,
+        comune=comune, tipo_catasto=tipo_catasto, foglio=foglio, particella=particella,
+    )
+
+
+@query_app.command("ipotecaria-persona")
+def ipotecaria_persona(
+    provincia: str = typer.Option(..., "--provincia", "-P", help="Province name"),
+    codice_fiscale: str = typer.Option(..., "--cf", help="Codice fiscale"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-confirm cost without prompting"),
+):
+    """Ispezione Ipotecaria by person (codice fiscale). PAID SERVICE."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/ispezione-ipotecaria (persona_fisica)")
+        return
+    _ipotecaria_command(
+        "persona_fisica", provincia, client, wait, output, yes=yes,
+        codice_fiscale=codice_fiscale,
+    )
+
+
+@query_app.command("ipotecaria-azienda")
+def ipotecaria_azienda(
+    provincia: str = typer.Option(..., "--provincia", "-P", help="Province name"),
+    identificativo: str = typer.Option(..., "--id", help="P.IVA or company name"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-confirm cost without prompting"),
+):
+    """Ispezione Ipotecaria by company (P.IVA or name). PAID SERVICE."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/ispezione-ipotecaria (persona_giuridica)")
+        return
+    _ipotecaria_command(
+        "persona_giuridica", provincia, client, wait, output, yes=yes,
+        identificativo=identificativo,
+    )
+
+
+@query_app.command("ipotecaria-nota")
+def ipotecaria_nota(
+    provincia: str = typer.Option(..., "--provincia", "-P", help="Province name"),
+    numero_nota: str = typer.Option(..., "--numero", "-n", help="Note number"),
+    anno_nota: Optional[str] = typer.Option(None, "--anno", help="Note year"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-confirm cost without prompting"),
+):
+    """Ispezione Ipotecaria by note reference. PAID SERVICE."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/ispezione-ipotecaria (nota)")
+        return
+    _ipotecaria_command(
+        "nota", provincia, client, wait, output, yes=yes,
+        numero_nota=numero_nota, anno_nota=anno_nota,
+    )
+
+
+@query_app.command("ipotecaria-stato")
+def ipotecaria_stato(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+):
+    """Check Ispezioni Ipotecarie automation status (Stato dell'automazione)."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/ipotecaria-stato")
+        return
+    _generic_search_command("ipotecaria_stato", "", client, wait, output)
+
+
+@query_app.command("ipotecaria-elenchi")
+def ipotecaria_elenchi(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+):
+    """View billed lists (Elenchi contabilizzati) from Ispezioni Ipotecarie."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/ipotecaria-elenchi")
+        return
+    _generic_search_command("ipotecaria_elenchi", "", client, wait, output)
+
+
 # -- Workflow presets ---------------------------------------------------------
 
-_PRESETS = {
-    "due-diligence": {
-        "description": "Real estate due diligence: search → intestati → ispezioni",
-        "requires": ("provincia", "comune", "foglio", "particella"),
-        "steps": {"search": True, "intestati": True, "ispezioni": True},
-    },
-    "patrimonio": {
-        "description": "Asset investigation: soggetto (nazionale) → for each property → intestati",
-        "requires": ("codice_fiscale",),
-        "steps": {"soggetto": True, "intestati_from_soggetto": True},
-    },
-    "fondiario": {
-        "description": "Land survey: elenco immobili → mappa → fiduciali → originali",
-        "requires": ("provincia", "comune"),
-        "steps": {"elenco": True, "mappa": True, "fiduciali": True, "originali": True},
-    },
-    "aziendale": {
-        "description": "Corporate property audit: azienda → for each property → search → intestati",
-        "requires": ("azienda_id",),
-        "steps": {"azienda": True, "intestati_from_soggetto": True},
-    },
-    "storico": {
-        "description": "Parcel history: search → intestati → nota → ispezioni → ispezioni_cart → originali",
-        "requires": ("provincia", "comune", "foglio", "particella"),
-        "steps": {"search": True, "intestati": True, "nota": True, "ispezioni": True, "ispezioni_cart": True, "originali": True},
-    },
-    "indirizzo": {
-        "description": "Address lookup: indirizzo → search → intestati",
-        "requires": ("provincia", "comune", "indirizzo_str"),
-        "steps": {"indirizzo_search": True, "search": True, "intestati": True},
-    },
-    "cross-reference": {
-        "description": "Cross-reference: soggetto + azienda, compare property overlap",
-        "requires": ("codice_fiscale", "azienda_id"),
-        "steps": {"soggetto": True, "azienda": True},
-    },
-}
+from .models import WORKFLOW_PRESETS as _PRESETS
 
 
 def _run_step(client, label, coro):
@@ -905,6 +1061,10 @@ def workflow(
     with_originali: bool = typer.Option(False, "--originali", help="Fetch original registration records"),
     with_nota: bool = typer.Option(False, "--with-nota", help="Fetch annotation/note data"),
     with_ispezioni_cart: bool = typer.Option(False, "--ispezioni-cart", help="Fetch paper inspection records"),
+    depth: str = typer.Option("standard", "--depth", "-d", help="Workflow depth: light, standard, deep"),
+    max_fanout: int = typer.Option(20, "--max-fanout", help="Max properties/owners to fan out to"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Auto-confirm paid service costs"),
+    include_paid: bool = typer.Option(False, "--include-paid", help="Include paid steps (e.g. ispezione ipotecaria)"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview steps without executing"),
     force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
@@ -917,23 +1077,29 @@ def workflow(
 
     \b
     Available presets:
-      due-diligence   search → intestati → ispezioni
-      patrimonio      soggetto (nazionale) → intestati per immobile
-      fondiario       elenco → mappa → fiduciali → originali
-      aziendale       azienda → intestati per immobile
-      storico         search → intestati → nota → ispezioni → originali
+      due-diligence   search → intestati → ispezioni → elaborato
+      patrimonio      soggetto → drill intestati → address lookup
+      fondiario       elenco → mappa → export → fiduciali → originali → elaborato
+      aziendale       azienda → drill intestati → address lookup
+      storico         search → intestati → nota → ispezioni → originali → elaborato
       indirizzo       indirizzo → search → intestati
-      cross-reference soggetto + azienda (compare overlap)
+      cross-reference soggetto + azienda → owner cross-reference
+
+    \b
+    Depth modes:
+      light     Only core discovery steps (fast, free)
+      standard  Adds per-property enrichment (default)
+      deep      Adds owner expansion, paid inspections (requires --include-paid --yes)
 
     \b
     Examples:
-      sister query workflow --preset due-diligence -P Trieste -C TRIESTE -F 9 -p 166
-      sister query workflow --preset patrimonio --cf RSSMRA85M01H501Z
-      sister query workflow --preset fondiario -P Roma -C ROMA -F 100
-      sister query workflow --preset aziendale --azienda 01234567890
-      sister query workflow -P Trieste -C TRIESTE -F 9 -p 166 --elenco --mappa
+      uv run sister query workflow --preset due-diligence -P Trieste -C TRIESTE -F 9 -p 166
+      uv run sister query workflow --preset patrimonio --cf RSSMRA85M01H501Z
+      uv run sister query workflow --preset fondiario -P Roma -C ROMA -F 100
+      uv run sister query workflow --preset due-diligence -P Roma -C ROMA -F 1 -p 1 --depth deep --include-paid --yes
+      uv run sister query workflow -P Trieste -C TRIESTE -F 9 -p 166 --elenco --mappa
     """
-    # -- Apply preset flags ---------------------------------------------------
+    # -- Server-side preset execution ------------------------------------------
 
     if preset:
         if preset not in _PRESETS:
@@ -942,51 +1108,91 @@ def workflow(
             raise typer.Exit(1)
 
         p = _PRESETS[preset]
-        steps = p["steps"]
 
-        # Validate required fields
-        field_map = {
-            "provincia": provincia, "comune": comune, "foglio": foglio,
-            "particella": particella, "codice_fiscale": codice_fiscale,
-            "azienda_id": azienda_id, "indirizzo_str": indirizzo_str,
-        }
-        missing = [f for f in p["requires"] if not field_map.get(f)]
-        if missing:
-            flag_names = {"provincia": "-P", "comune": "-C", "foglio": "-F", "particella": "-p",
-                          "codice_fiscale": "--cf", "azienda_id": "--azienda", "indirizzo_str": "--indirizzo"}
-            console.print(f"[red]Preset '{preset}' requires: {', '.join(flag_names.get(f, f) for f in missing)}[/red]")
-            raise typer.Exit(1)
-
-        # Enable flags based on preset
-        if steps.get("elenco"):
-            with_elenco = True
-        if steps.get("mappa"):
-            with_mappa = True
-        if steps.get("ispezioni"):
-            with_ispezioni = True
-        if steps.get("fiduciali"):
-            with_fiduciali = True
-        if steps.get("originali"):
-            with_originali = True
-        if steps.get("nota"):
-            with_nota = True
-        if steps.get("ispezioni_cart"):
-            with_ispezioni_cart = True
+        if dry_run:
+            console.print(f"[bold yellow]DRY RUN[/bold yellow] — POST /visura/workflow (preset={preset}, depth={depth})")
+            console.print(f"  {p['description']}")
+            console.print(f"  Steps: {' → '.join(p['steps'])}")
+            console.print(f"  Depth: [cyan]{depth}[/cyan]  Max fanout: [cyan]{max_fanout}[/cyan]")
+            if include_paid:
+                console.print(f"  [yellow]Paid steps enabled (auto_confirm={yes})[/yellow]")
+            return
 
         console.print(f"[bold]Preset: {preset}[/bold] — {p['description']}")
+        console.print(f"[dim]Depth: {depth} | Max fanout: {max_fanout}[/dim]")
+
+        client = VisuraClient()
+        try:
+            result = asyncio.run(
+                client.workflow(
+                    preset=preset,
+                    provincia=provincia, comune=comune, foglio=foglio,
+                    particella=particella, tipo_catasto=tipo_catasto,
+                    sezione=sezione, subalterno=subalterno,
+                    codice_fiscale=codice_fiscale, identificativo=azienda_id,
+                    indirizzo=indirizzo_str,
+                    depth=depth, max_fanout=max_fanout,
+                    auto_confirm=yes, include_paid_steps=include_paid,
+                )
+            )
+        except VisuraAPIError as e:
+            _handle_api_error(e)
+            return
+
+        if result.get("error"):
+            console.print(f"[red]Error: {result['error']}[/red]")
+            raise typer.Exit(1)
+
+        # Print step results
+        steps_data = result.get("steps", [])
+        for step in steps_data:
+            status = step.get("status", "unknown")
+            step_name = step.get("step", "?")
+            style = "green" if status == "completed" else ("red" if status == "error" else "yellow")
+            console.print(f"\n  [{style}]{step_name}[/{style}] — {status}")
+
+            if status == "error":
+                console.print(f"    [red]{step.get('error', '')}[/red]")
+            elif status == "completed" and step.get("data"):
+                data = step["data"]
+                if isinstance(data, dict):
+                    # Show counts for known keys
+                    for key in ("immobili", "intestati", "risultati", "drill_results"):
+                        items = data.get(key, [])
+                        if items and isinstance(items, list):
+                            console.print(f"    {key}: [cyan]{len(items)}[/cyan] records")
+                    if "total" in data:
+                        console.print(f"    total: [cyan]{data['total']}[/cyan]")
+                    if data.get("truncated"):
+                        console.print(f"    [yellow]Results truncated (max 20 drill-down properties)[/yellow]")
+
+        # Summary
+        summary = result.get("summary", {})
+        console.rule("[bold green]Workflow complete[/bold green]")
+        console.print(
+            f"  Steps: [green]{summary.get('completed', 0)}[/green] completed, "
+            f"[red]{summary.get('failed', 0)}[/red] failed, "
+            f"[yellow]{summary.get('skipped', 0)}[/yellow] skipped"
+        )
+        if summary.get("properties", 0) > 0:
+            console.print(f"  Properties: [cyan]{summary['properties']}[/cyan]  Owners: [cyan]{summary.get('owners', 0)}[/cyan]")
+        if summary.get("risk_flags", 0) > 0:
+            console.print(f"  [yellow]Risk flags: {summary['risk_flags']}[/yellow]")
+
+        if output:
+            _write_output(result, output)
+        return
+
+    # -- Custom workflow (no preset) — client-side orchestration ---------------
 
     client = VisuraClient()
-    all_data = {"preset": preset} if preset else {}
-
-    # -- Dry run preview ------------------------------------------------------
+    all_data: dict = {}
 
     if dry_run:
-        console.print("[bold yellow]DRY RUN[/bold yellow] — workflow preview")
-        if preset:
-            console.print(f"  Preset: {preset}")
-        if codice_fiscale and (not preset or _PRESETS.get(preset, {}).get("steps", {}).get("soggetto")):
+        console.print("[bold yellow]DRY RUN[/bold yellow] — custom workflow preview")
+        if codice_fiscale:
             console.print(f"  → soggetto CF={codice_fiscale}")
-        if azienda_id and (not preset or _PRESETS.get(preset, {}).get("steps", {}).get("azienda")):
+        if azienda_id:
             console.print(f"  → azienda ID={azienda_id}")
         if indirizzo_str:
             console.print(f"  → indirizzo '{indirizzo_str}' {provincia}/{comune}")
@@ -1082,7 +1288,7 @@ def workflow(
     # -- Phase: intestati (if search found immobili) --------------------------
 
     intestati_results = []
-    need_intestati = (not preset) or _PRESETS.get(preset, {}).get("steps", {}).get("intestati") or _PRESETS.get(preset, {}).get("steps", {}).get("search")
+    need_intestati = True  # Custom workflow always includes intestati after search
 
     if all_immobili and need_intestati and provincia and comune and foglio and particella:
         intestati_targets = []

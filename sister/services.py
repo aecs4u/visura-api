@@ -27,6 +27,7 @@ from .models import (
     BrowserError,
     ElencoImmobiliRequest,
     GenericSisterRequest,
+    IspezioneIpotecariaRequest,
     QueueFullError,
     SubmitResult,
     VisuraIntestatiRequest,
@@ -41,8 +42,11 @@ from .utils import (
     run_elaborato_planimetrico,
     run_elenco_immobili,
     run_export_mappa,
+    run_ispezione_ipotecaria,
     run_ispezioni,
     run_ispezioni_cartacee,
+    run_ispezioni_ipotecarie_elenchi,
+    run_ispezioni_ipotecarie_stato,
     run_originali_impianto,
     run_punti_fiduciali,
     run_ricerca_indirizzo,
@@ -73,6 +77,8 @@ _GENERIC_DISPATCHERS = {
 _NOARGS_DISPATCHERS = {
     "riepilogo_visure": run_riepilogo_visure,
     "richieste": run_consultazione_richieste,
+    "ipotecaria_stato": run_ispezioni_ipotecarie_stato,
+    "ipotecaria_elenchi": run_ispezioni_ipotecarie_elenchi,
 }
 
 logger = logging.getLogger("sister")
@@ -381,6 +387,48 @@ class BrowserManager:
                 tipo_catasto=request.tipo_catasto, error=f"Errore inatteso: {str(e)}",
             )
 
+    async def esegui_ispezione_ipotecaria(self, request: IspezioneIpotecariaRequest) -> VisuraResponse:
+        """Execute an Ispezione Ipotecaria (paid inspection)."""
+        try:
+            async with self._page_lock:
+                page = await self._get_authenticated_page()
+                try:
+                    result = await run_ispezione_ipotecaria(
+                        page,
+                        provincia=request.provincia,
+                        comune=request.comune,
+                        tipo_ricerca=request.tipo_ricerca,
+                        codice_fiscale=request.codice_fiscale,
+                        identificativo=request.identificativo,
+                        foglio=request.foglio,
+                        particella=request.particella,
+                        numero_nota=request.numero_nota,
+                        anno_nota=request.anno_nota,
+                        tipo_catasto=request.tipo_catasto,
+                        auto_confirm=request.auto_confirm,
+                    )
+                except Exception as e:
+                    raise BrowserError(f"Failed to execute ispezione ipotecaria: {e}") from e
+
+            return VisuraResponse(
+                request_id=request.request_id,
+                success=True,
+                tipo_catasto=request.tipo_catasto,
+                data=result,
+            )
+        except (AuthenticationError, BrowserError) as e:
+            logger.error("Errore in ispezione ipotecaria %s: %s", request.request_id, e)
+            return VisuraResponse(
+                request_id=request.request_id, success=False,
+                tipo_catasto=request.tipo_catasto, error=str(e),
+            )
+        except Exception as e:
+            logger.error("Errore inatteso in ispezione ipotecaria %s: %s", request.request_id, e)
+            return VisuraResponse(
+                request_id=request.request_id, success=False,
+                tipo_catasto=request.tipo_catasto, error=f"Errore inatteso: {str(e)}",
+            )
+
     async def esegui_extract_sezioni(self, tipo_catasto: str, max_province: int) -> list:
         """Esegue l'estrazione sezioni in modo esclusivo sulla sessione browser condivisa."""
         async with self._page_lock:
@@ -483,6 +531,12 @@ class VisuraService:
                         logger.info(f"Processata richiesta elenco immobili {request.request_id}")
                         should_sleep = True
 
+                    elif isinstance(request, IspezioneIpotecariaRequest):
+                        response = await self.browser_manager.esegui_ispezione_ipotecaria(request)
+                        await self._store_response(response)
+                        logger.info(f"Processata richiesta ipotecaria {request.request_id}")
+                        should_sleep = True
+
                     elif isinstance(request, GenericSisterRequest):
                         response = await self.browser_manager.esegui_generic(request)
                         await self._store_response(response)
@@ -496,7 +550,7 @@ class VisuraService:
                     logger.error(f"Errore nel processare richieste: {e}")
                     await asyncio.sleep(5)
                 finally:
-                    if isinstance(request, (VisuraRequest, VisuraIntestatiRequest, VisuraSoggettoRequest, VisuraPersonaGiuridicaRequest, ElencoImmobiliRequest, GenericSisterRequest)):
+                    if isinstance(request, (VisuraRequest, VisuraIntestatiRequest, VisuraSoggettoRequest, VisuraPersonaGiuridicaRequest, ElencoImmobiliRequest, GenericSisterRequest, IspezioneIpotecariaRequest)):
                         self.pending_request_ids.discard(request.request_id)
                     self.request_queue.task_done()
 
@@ -740,6 +794,10 @@ class VisuraService:
     async def add_generic_request(self, request: GenericSisterRequest, force: bool = False) -> str | SubmitResult:
         """Aggiunge una richiesta generica alla coda."""
         return await self._add_single(request.search_type, request, force=force)
+
+    async def add_ispezione_ipotecaria_request(self, request: IspezioneIpotecariaRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta ispezione ipotecaria alla coda."""
+        return await self._add_single(f"ipotecaria_{request.tipo_ricerca}", request, force=force)
 
     async def add_elenco_immobili_request(self, request: ElencoImmobiliRequest, force: bool = False) -> str | SubmitResult:
         """Aggiunge una richiesta elenco immobili alla coda."""

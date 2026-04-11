@@ -22,6 +22,7 @@ from .database import (  # noqa: F401
 from .database import get_response as load_stored_response  # noqa: F401
 from .models import (  # noqa: F401
     ElencoImmobiliInput,
+    IspezioneIpotecariaInput,
     SezioniExtractionRequest,
     VisuraInput,
     VisuraIntestatiInput,
@@ -29,8 +30,10 @@ from .models import (  # noqa: F401
     VisuraRequest,
     VisuraResponse,
     VisuraSoggettoInput,
+    WorkflowInput,
 )
 from .routes import (
+    execute_workflow,
     extract_sezioni,
     graceful_shutdown_endpoint,
     health_check,
@@ -38,6 +41,7 @@ from .routes import (
     richiedi_elenco_immobili,
     richiedi_generic_sister,
     richiedi_intestati_immobile,
+    richiedi_ispezione_ipotecaria,
     richiedi_visura,
     richiedi_visura_persona_giuridica,
     richiedi_visura_soggetto,
@@ -266,6 +270,25 @@ async def _richiedi_elenco_immobili(
     return await richiedi_elenco_immobili(request, service, force=force)
 
 
+@app.post("/visura/workflow")
+async def _execute_workflow(
+    request: WorkflowInput,
+    service: VisuraService = Depends(get_visura_service),
+    _: None = Depends(require_api_key),
+):
+    return await execute_workflow(request, service)
+
+
+@app.post("/visura/ispezione-ipotecaria")
+async def _richiedi_ispezione_ipotecaria(
+    request: IspezioneIpotecariaInput,
+    force: bool = False,
+    service: VisuraService = Depends(get_visura_service),
+    _: None = Depends(require_api_key),
+):
+    return await richiedi_ispezione_ipotecaria(request, service, force=force)
+
+
 @app.post("/visura/{search_type}")
 async def _richiedi_generic(
     search_type: str,
@@ -282,7 +305,7 @@ async def _richiedi_generic(
     anno_nota: Optional[str] = None,
     partita: Optional[str] = None,
 ):
-    valid_types = {"indirizzo", "partita", "nota", "mappa", "export-mappa", "originali", "fiduciali", "ispezioni", "ispezioni-cartacee", "elaborato-planimetrico", "riepilogo-visure", "richieste"}
+    valid_types = {"indirizzo", "partita", "nota", "mappa", "export-mappa", "originali", "fiduciali", "ispezioni", "ispezioni-cartacee", "elaborato-planimetrico", "riepilogo-visure", "richieste", "ipotecaria-stato", "ipotecaria-elenchi"}
     normalized = search_type.replace("-", "_")
     if normalized.replace("_", "-") not in {t.replace("_", "-") for t in valid_types}:
         raise HTTPException(status_code=404, detail=f"Search type '{search_type}' not found")

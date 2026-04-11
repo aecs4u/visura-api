@@ -244,6 +244,93 @@ class VisuraClient:
             payload["sezione"] = sezione
         return await self._request("POST", "/visura/elenco-immobili", json=payload, force=force)
 
+    async def workflow(
+        self,
+        *,
+        preset: str,
+        provincia: str | None = None,
+        comune: str | None = None,
+        foglio: str | None = None,
+        particella: str | None = None,
+        tipo_catasto: str | None = None,
+        sezione: str | None = None,
+        subalterno: str | None = None,
+        codice_fiscale: str | None = None,
+        identificativo: str | None = None,
+        indirizzo: str | None = None,
+        auto_confirm: bool = False,
+        include_paid_steps: bool = False,
+        depth: str = "standard",
+        max_fanout: int = 20,
+    ) -> dict:
+        """Execute a multi-step workflow (POST /visura/workflow)."""
+        payload: dict[str, Any] = {"preset": preset, "depth": depth, "max_fanout": max_fanout}
+        if provincia:
+            payload["provincia"] = provincia
+        if comune:
+            payload["comune"] = comune
+        if foglio:
+            payload["foglio"] = foglio
+        if particella:
+            payload["particella"] = particella
+        if tipo_catasto:
+            payload["tipo_catasto"] = tipo_catasto.upper()
+        if sezione:
+            payload["sezione"] = sezione
+        if subalterno:
+            payload["subalterno"] = subalterno
+        if codice_fiscale:
+            payload["codice_fiscale"] = codice_fiscale.upper()
+        if identificativo:
+            payload["identificativo"] = identificativo
+        if indirizzo:
+            payload["indirizzo"] = indirizzo
+        if auto_confirm:
+            payload["auto_confirm"] = True
+        if include_paid_steps:
+            payload["include_paid_steps"] = True
+        return await self._request("POST", "/visura/workflow", json=payload)
+
+    async def ispezione_ipotecaria(
+        self,
+        *,
+        tipo_ricerca: str,
+        provincia: str,
+        comune: str | None = None,
+        tipo_catasto: str | None = None,
+        codice_fiscale: str | None = None,
+        identificativo: str | None = None,
+        foglio: str | None = None,
+        particella: str | None = None,
+        numero_nota: str | None = None,
+        anno_nota: str | None = None,
+        auto_confirm: bool = False,
+        force: bool = False,
+    ) -> dict:
+        """Submit an Ispezione Ipotecaria (POST /visura/ispezione-ipotecaria)."""
+        payload: dict[str, Any] = {
+            "tipo_ricerca": tipo_ricerca,
+            "provincia": provincia,
+            "auto_confirm": auto_confirm,
+        }
+        if comune:
+            payload["comune"] = comune
+        if tipo_catasto:
+            payload["tipo_catasto"] = tipo_catasto.upper()
+        if codice_fiscale:
+            payload["codice_fiscale"] = codice_fiscale.upper()
+        if identificativo:
+            payload["identificativo"] = identificativo
+        if foglio:
+            payload["foglio"] = foglio
+        if particella:
+            payload["particella"] = particella
+        if numero_nota:
+            payload["numero_nota"] = numero_nota
+        if anno_nota:
+            payload["anno_nota"] = anno_nota
+        return await self._request("POST", "/visura/ispezione-ipotecaria", json=payload, force=force)
+
     async def generic_search(
         self,
         *,

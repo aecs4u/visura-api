@@ -293,6 +293,187 @@ class GenericSisterRequest:
             self.params = {}
 
 
+@dataclass
+class IspezioneIpotecariaRequest:
+    """Request for Ispezione Ipotecaria (paid inspection service)."""
+
+    request_id: str
+    tipo_ricerca: str  # immobile, persona_fisica, persona_giuridica, nota
+    provincia: str
+    comune: Optional[str] = None
+    tipo_catasto: str = "T"
+    codice_fiscale: Optional[str] = None
+    identificativo: Optional[str] = None
+    foglio: Optional[str] = None
+    particella: Optional[str] = None
+    numero_nota: Optional[str] = None
+    anno_nota: Optional[str] = None
+    auto_confirm: bool = False
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
+
+
+class IspezioneIpotecariaInput(BaseModel):
+    """API input for Ispezione Ipotecaria (paid inspection)."""
+
+    tipo_ricerca: str = Field(
+        ..., description="Search type: immobile, persona_fisica, persona_giuridica, nota"
+    )
+    provincia: str = Field(..., min_length=1, description="Province name")
+    comune: Optional[str] = Field(None, description="Municipality name")
+    tipo_catasto: Optional[str] = Field(
+        None, pattern=r"^[TF]$", description="'T' = Terreni, 'F' = Fabbricati"
+    )
+    codice_fiscale: Optional[str] = Field(None, description="Codice fiscale (for persona_fisica)")
+    identificativo: Optional[str] = Field(None, description="P.IVA or company name (for persona_giuridica)")
+    foglio: Optional[str] = Field(None, description="Sheet number (for immobile)")
+    particella: Optional[str] = Field(None, description="Parcel number (for immobile)")
+    numero_nota: Optional[str] = Field(None, description="Note number (for nota)")
+    anno_nota: Optional[str] = Field(None, description="Note year (for nota)")
+    auto_confirm: bool = Field(False, description="Auto-confirm cost without prompting")
+
+    @field_validator("tipo_ricerca", mode="before")
+    @classmethod
+    def validate_tipo_ricerca(cls, value: str) -> str:
+        normalized = value.strip().lower().replace("-", "_")
+        valid = {"immobile", "persona_fisica", "persona_giuridica", "nota"}
+        if normalized not in valid:
+            raise ValueError(f"tipo_ricerca must be one of {valid}, got '{value}'")
+        return normalized
+
+    @field_validator("tipo_catasto", mode="before")
+    @classmethod
+    def validate_tipo_catasto(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if normalized not in {"T", "F"}:
+            raise ValueError(f"tipo_catasto deve essere 'T' o 'F', ricevuto {value}")
+        return normalized
+
+
+# Step depth tiers: light < standard < deep
+# Each step specifies the minimum depth required and whether it's paid.
+STEP_METADATA = {
+    # Core discovery (light)
+    "search":                    {"depth": "light",    "paid": False},
+    "intestati":                 {"depth": "light",    "paid": False},
+    "soggetto":                  {"depth": "light",    "paid": False},
+    "azienda":                   {"depth": "light",    "paid": False},
+    "elenco":                    {"depth": "light",    "paid": False},
+    "indirizzo_search":          {"depth": "light",    "paid": False},
+    # Standard enrichment
+    "drill_intestati":           {"depth": "standard", "paid": False},
+    "mappa":                     {"depth": "standard", "paid": False},
+    "fiduciali":                 {"depth": "standard", "paid": False},
+    "originali":                 {"depth": "standard", "paid": False},
+    "ispezioni":                 {"depth": "standard", "paid": False},
+    "ispezioni_cart":            {"depth": "standard", "paid": False},
+    "elaborato_planimetrico":    {"depth": "standard", "paid": False},
+    "export_mappa":              {"depth": "standard", "paid": False},
+    "nota":                      {"depth": "standard", "paid": False},
+    "indirizzo_reverse":         {"depth": "standard", "paid": False},
+    # Deep enrichment (fan-out, paid)
+    "cross_property_intestati":  {"depth": "deep",     "paid": False},
+    "ispezione_ipotecaria":      {"depth": "deep",     "paid": True},
+}
+
+_DEPTH_ORDER = {"light": 0, "standard": 1, "deep": 2}
+
+WORKFLOW_PRESETS = {
+    "due-diligence": {
+        "description": "Real estate due diligence: search → intestati → ispezioni → elaborato planimetrico",
+        "steps": ["search", "intestati", "ispezioni", "elaborato_planimetrico",
+                  "cross_property_intestati", "ispezione_ipotecaria"],
+        "requires": ["provincia", "comune", "foglio", "particella"],
+    },
+    "patrimonio": {
+        "description": "Asset investigation: soggetto → drill-down intestati → reverse address lookup",
+        "steps": ["soggetto", "drill_intestati", "indirizzo_reverse",
+                  "cross_property_intestati", "ispezione_ipotecaria"],
+        "requires": ["codice_fiscale"],
+    },
+    "fondiario": {
+        "description": "Land survey: elenco → mappa → export mappa → fiduciali → originali → elaborato planimetrico",
+        "steps": ["elenco", "mappa", "export_mappa", "fiduciali", "originali", "elaborato_planimetrico"],
+        "requires": ["provincia", "comune"],
+    },
+    "aziendale": {
+        "description": "Corporate audit: azienda → drill-down intestati → reverse address lookup",
+        "steps": ["azienda", "drill_intestati", "indirizzo_reverse",
+                  "cross_property_intestati", "ispezione_ipotecaria"],
+        "requires": ["identificativo"],
+    },
+    "storico": {
+        "description": "Parcel history: search → intestati → nota → ispezioni → originali → elaborato planimetrico",
+        "steps": ["search", "intestati", "nota", "ispezioni", "ispezioni_cart", "originali",
+                  "elaborato_planimetrico", "cross_property_intestati", "ispezione_ipotecaria"],
+        "requires": ["provincia", "comune", "foglio", "particella"],
+    },
+    "indirizzo": {
+        "description": "Address lookup: indirizzo → search → intestati",
+        "steps": ["indirizzo_search", "search", "intestati", "cross_property_intestati"],
+        "requires": ["provincia", "comune", "indirizzo"],
+    },
+    "cross-reference": {
+        "description": "Cross-reference: soggetto + azienda → cross-property intestati comparison",
+        "steps": ["soggetto", "azienda", "cross_property_intestati"],
+        "requires": ["codice_fiscale", "identificativo"],
+    },
+}
+
+
+class WorkflowInput(BaseModel):
+    """API input for multi-step workflow execution."""
+
+    preset: str = Field(..., description="Workflow preset name")
+    provincia: Optional[str] = Field(None, description="Province name")
+    comune: Optional[str] = Field(None, description="Municipality name")
+    foglio: Optional[str] = Field(None, description="Sheet number")
+    particella: Optional[str] = Field(None, description="Parcel number")
+    tipo_catasto: Optional[str] = Field(
+        None, pattern=r"^[TFE]$", description="'T' = Terreni, 'F' = Fabbricati, 'E' = Both"
+    )
+    sezione: Optional[str] = Field(None, description="Section (optional)")
+    subalterno: Optional[str] = Field(None, description="Sub-unit (optional)")
+    codice_fiscale: Optional[str] = Field(None, description="Codice fiscale")
+    identificativo: Optional[str] = Field(None, description="P.IVA or company name")
+    indirizzo: Optional[str] = Field(None, description="Street address")
+    auto_confirm: bool = Field(False, description="Auto-confirm paid service costs")
+    include_paid_steps: bool = Field(False, description="Include optional paid steps (e.g. ispezione ipotecaria)")
+    depth: str = Field("standard", description="Workflow depth: light, standard, deep")
+    max_fanout: int = Field(20, ge=1, le=100, description="Max properties/owners to fan out to in enrichment steps")
+
+    @field_validator("depth", mode="before")
+    @classmethod
+    def validate_depth(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"light", "standard", "deep"}:
+            raise ValueError(f"depth must be 'light', 'standard', or 'deep', got '{value}'")
+        return normalized
+
+    @field_validator("preset", mode="before")
+    @classmethod
+    def validate_preset(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in WORKFLOW_PRESETS:
+            raise ValueError(f"Unknown preset '{value}'. Available: {', '.join(WORKFLOW_PRESETS)}")
+        return normalized
+
+    @field_validator("tipo_catasto", mode="before")
+    @classmethod
+    def validate_tipo_catasto(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if normalized not in {"T", "F", "E"}:
+            raise ValueError(f"tipo_catasto deve essere 'T', 'F' o 'E', ricevuto {value}")
+        return normalized
+
+
 class SezioniExtractionRequest(BaseModel):
     """Richiesta per l'estrazione delle sezioni territoriali"""
 

@@ -27,6 +27,8 @@ from .db_models import (
     IntestatoDB,
     VisuraRequestDB,
     VisuraResponseDB,
+    WorkflowRunDB,
+    WorkflowStepDB,
 )
 
 # Collect only sister's tables — avoid creating tables from other packages
@@ -36,6 +38,8 @@ _SISTER_TABLES = [
     VisuraResponseDB.__table__,
     ImmobileDB.__table__,
     IntestatoDB.__table__,
+    WorkflowRunDB.__table__,
+    WorkflowStepDB.__table__,
 ]
 
 logger = logging.getLogger("sister")

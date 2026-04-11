@@ -113,12 +113,23 @@
 
     // Collect form parameters (inputs, selects, and textareas)
     const body = {};
-    form.querySelectorAll('input[type="text"], input[type="email"], select, textarea').forEach(input => {
+    form.querySelectorAll('input[type="text"], input[type="email"], input[type="hidden"], select, textarea').forEach(input => {
       const name = input.name;
       if (name && !name.startsWith('endpoint-') && input.value.trim()) {
         body[name] = input.value.trim();
       }
     });
+
+    // Convert string booleans to actual booleans for the API
+    if (body.auto_confirm !== undefined) {
+      body.auto_confirm = body.auto_confirm === 'true';
+    }
+    if (body.include_paid_steps !== undefined) {
+      body.include_paid_steps = body.include_paid_steps === 'true';
+    }
+    if (body.max_fanout !== undefined) {
+      body.max_fanout = parseInt(body.max_fanout, 10) || 20;
+    }
 
     const responseDiv = document.getElementById('response-' + groupId);
     const statusDiv = document.getElementById('response-status-' + groupId);
@@ -151,6 +162,53 @@
         const alertClass = errors > 0 ? 'alert-warning' : 'alert-success';
         const icon = errors > 0 ? 'fa-exclamation-triangle' : 'fa-check-circle';
         statusDiv.innerHTML = '<div class="alert ' + alertClass + '"><i class="fas ' + icon + ' me-2"></i>Batch: ' + submitted + ' submitted, ' + errors + ' error(s) out of ' + data.total_rows + ' rows</div>';
+        contentDiv.textContent = JSON.stringify(data, null, 2);
+        return;
+      }
+
+      // Check for workflow response (has steps array and summary)
+      if (data.preset && data.steps) {
+        const summary = data.summary || {};
+        const completed = summary.completed || 0;
+        const failed = summary.failed || 0;
+        const skipped = summary.skipped || 0;
+        const discovered = summary.discovered_properties || 0;
+        const alertClass = failed > 0 ? 'alert-warning' : 'alert-success';
+        const icon = failed > 0 ? 'fa-exclamation-triangle' : 'fa-check-circle';
+
+        let html = '<div class="alert ' + alertClass + '"><i class="fas ' + icon + ' me-2"></i>';
+        html += '<strong>Workflow: ' + data.preset + '</strong> — ';
+        html += completed + ' completed, ' + failed + ' failed, ' + skipped + ' skipped';
+        const props = summary.properties || 0;
+        const owners = summary.owners || 0;
+        const risks = summary.risk_flags || 0;
+        if (props > 0 || owners > 0) html += ' | ' + props + ' properties, ' + owners + ' owners';
+        if (risks > 0) html += ' | <span class="text-warning">' + risks + ' risk flag(s)</span>';
+        html += '</div>';
+
+        // Render step-by-step results
+        html += '<div class="list-group mb-3">';
+        for (const step of data.steps) {
+          const badge = step.status === 'completed' ? 'bg-success' : (step.status === 'error' ? 'bg-danger' : 'bg-secondary');
+          html += '<div class="list-group-item">';
+          html += '<span class="badge ' + badge + ' me-2">' + step.status + '</span>';
+          html += '<strong>' + step.step + '</strong>';
+          if (step.error) html += ' <span class="text-danger ms-2">' + step.error + '</span>';
+          if (step.data) {
+            const d = step.data;
+            const counts = [];
+            for (const key of ['immobili', 'intestati', 'risultati', 'drill_results']) {
+              if (d[key] && Array.isArray(d[key])) counts.push(key + ': ' + d[key].length);
+            }
+            if (d.total !== undefined) counts.push('total: ' + d.total);
+            if (d.truncated) counts.push('(truncated)');
+            if (counts.length) html += ' <span class="text-muted ms-2">' + counts.join(', ') + '</span>';
+          }
+          html += '</div>';
+        }
+        html += '</div>';
+
+        statusDiv.innerHTML = html;
         contentDiv.textContent = JSON.stringify(data, null, 2);
         return;
       }

@@ -29,6 +29,8 @@ class VisuraRequestDB(SQLModel, table=True):
     sezione: Optional[str] = None
     subalterno: Optional[str] = None
     cache_key: Optional[str] = Field(default=None, index=True)
+    cost_text: Optional[str] = None
+    cost_value: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.now)
 
     response: Optional["VisuraResponseDB"] = Relationship(back_populates="request")
@@ -135,6 +137,43 @@ IMMOBILE_FIELD_MAP = {
     "Provincia": "provincia_result",
     "Comune": "comune_result",
 }
+
+class WorkflowRunDB(SQLModel, table=True):
+    """Tracks a workflow execution (preset, status, input/output)."""
+
+    __tablename__ = "workflow_runs"
+
+    workflow_id: str = Field(primary_key=True)
+    preset: str
+    status: str = Field(default="running")  # running, completed, partial, failed
+    input_json: Optional[str] = Field(default=None, sa_column=Column(Text))
+    output_json: Optional[str] = Field(default=None, sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+    steps: list["WorkflowStepDB"] = Relationship(back_populates="run")
+
+
+class WorkflowStepDB(SQLModel, table=True):
+    """Tracks individual steps within a workflow run."""
+
+    __tablename__ = "workflow_steps"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    workflow_id: str = Field(foreign_key="workflow_runs.workflow_id", index=True)
+    step_key: str  # deterministic key e.g. "intestati:F:TRIESTE:9:166:3"
+    status: str = Field(default="pending")  # pending, completed, error
+    result_json: Optional[str] = Field(default=None, sa_column=Column(Text))
+    error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    run: Optional["WorkflowRunDB"] = Relationship(back_populates="steps")
+
+    __table_args__ = (
+        Index("idx_workflow_steps_lookup", "workflow_id", "step_key"),
+    )
+
 
 INTESTATO_FIELD_MAP = {
     "Nominativo o denominazione": "nominativo",

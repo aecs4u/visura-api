@@ -17,6 +17,8 @@ from .models import (
     ElencoImmobiliInput,
     ElencoImmobiliRequest,
     GenericSisterRequest,
+    IspezioneIpotecariaInput,
+    IspezioneIpotecariaRequest,
     QueueFullError,
     SezioniExtractionRequest,
     VisuraInput,
@@ -27,6 +29,7 @@ from .models import (
     VisuraRequest,
     VisuraSoggettoInput,
     VisuraSoggettoRequest,
+    WorkflowInput,
 )
 from .models import SubmitResult
 from .services import VisuraService
@@ -388,6 +391,75 @@ async def richiedi_elenco_immobili(request: ElencoImmobiliInput, service: Visura
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error("Errore nella richiesta elenco immobili: %s", e)
+        raise HTTPException(status_code=500, detail="Errore interno del server")
+
+
+async def execute_workflow(request: WorkflowInput, service: VisuraService):
+    """Execute a multi-step workflow preset server-side."""
+    from .workflows import run_workflow
+
+    try:
+        result = await run_workflow(service, request)
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+        return JSONResponse(result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Errore nel workflow '%s': %s", request.preset, e)
+        raise HTTPException(status_code=500, detail="Errore interno del server")
+
+
+async def richiedi_ispezione_ipotecaria(request: IspezioneIpotecariaInput, service: VisuraService, force: bool = False):
+    """Submit an Ispezione Ipotecaria (paid inspection) request."""
+    try:
+        tipo_catasto = request.tipo_catasto or "T"
+        request_id = f"ipotecaria_{request.tipo_ricerca}_{uuid4().hex}"
+
+        ipotecaria_request = IspezioneIpotecariaRequest(
+            request_id=request_id,
+            tipo_ricerca=request.tipo_ricerca,
+            provincia=request.provincia,
+            comune=request.comune,
+            tipo_catasto=tipo_catasto,
+            codice_fiscale=request.codice_fiscale,
+            identificativo=request.identificativo,
+            foglio=request.foglio,
+            particella=request.particella,
+            numero_nota=request.numero_nota,
+            anno_nota=request.anno_nota,
+            auto_confirm=request.auto_confirm,
+        )
+
+        result = await service.add_ispezione_ipotecaria_request(ipotecaria_request, force=force)
+
+        if isinstance(result, SubmitResult) and result.cached and result.response:
+            return JSONResponse({
+                "request_id": result.request_id,
+                "tipo_ricerca": request.tipo_ricerca,
+                "status": "cached",
+                "data": result.response.data,
+            })
+
+        return JSONResponse({
+            "request_id": request_id,
+            "tipo_ricerca": request.tipo_ricerca,
+            "provincia": request.provincia,
+            "tipo_catasto": tipo_catasto,
+            "auto_confirm": request.auto_confirm,
+            "status": "queued",
+            "message": f"Ispezione ipotecaria ({request.tipo_ricerca}) aggiunta alla coda",
+            "queue_position": service.request_queue.qsize(),
+        })
+
+    except HTTPException:
+        raise
+    except QueueFullError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error("Errore nella richiesta ispezione ipotecaria: %s", e)
         raise HTTPException(status_code=500, detail="Errore interno del server")
 
 

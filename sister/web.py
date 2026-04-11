@@ -243,13 +243,7 @@ async def web_api_proxy(endpoint: str, request: Request, user=Depends(_require_a
     body = await request.json()
     base = f"http://localhost:{request.url.port or 8025}"
 
-    # For workflow, pass params as query string (not JSON body)
-    if endpoint == "workflow":
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{base}/visura", json=body, params={"force": "false"})
-        return JSONResponse(content=resp.json(), status_code=resp.status_code)
-
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
             f"{base}/visura/{endpoint}",
             json=body,

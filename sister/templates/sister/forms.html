@@ -48,6 +48,12 @@
                 <div class="single-job-content">
                 <div class="row g-3">
                     {% for param in form_group.params %}
+                    {% if param.input_type == 'hidden' %}
+                    <input type="hidden"
+                           id="param-{{ form_group.id }}-{{ param.name }}"
+                           name="{{ param.name }}"
+                           value="{{ param.example or '' }}">
+                    {% else %}
                     <div class="{% if param.input_type == 'textarea' %}col-12{% else %}col-md-6{% endif %}">
                         <label for="param-{{ form_group.id }}-{{ param.name }}" class="form-label">
                             {{ param.label }}
@@ -214,6 +220,7 @@
                         <div class="form-text">{{ param.help_text }}</div>
                         {% endif %}
                     </div>
+                    {% endif %}{# end hidden check #}
                     {% endfor %}
                 </div>
 

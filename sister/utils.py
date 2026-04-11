@@ -1528,6 +1528,304 @@ async def run_consultazione_richieste(page):
     }
 
 
+# ---------------------------------------------------------------------------
+# Ispezioni Ipotecarie (paid service)
+# ---------------------------------------------------------------------------
+
+ISPEZIONI_IPOTECARIE_URL = "https://sister3.agenziaentrate.gov.it/Ispezioni/SceltaServizio.do?tipo=/T/TM/VIVI_"
+
+
+async def _navigate_to_ispezioni_ipotecarie(page, page_logger, provincia, menu_link_name="Immobile"):
+    """Navigate to the Ispezioni Ipotecarie module and select a search type.
+
+    This handles:
+    1. Navigate via "Passa a Ispezioni" from Visure
+    2. Accept "Conferma Lettura"
+    3. Select province
+    4. Click the appropriate menu link (Persona fisica, Persona giuridica, Immobile, Nota)
+    """
+    await _navigate_to_ispezioni(page, page_logger, provincia, cartacee=False)
+
+    # After province is set, click the specific search type link
+    if menu_link_name != "Immobile":
+        link = page.get_by_role("link", name=menu_link_name, exact=True)
+        if await link.count() > 0:
+            await link.click()
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page_logger.log(page, f"ispezioni_{menu_link_name.lower().replace(' ', '_')}")
+
+
+async def _extract_cost_from_page(page):
+    """Extract the cost/price from a SISTER confirmation page.
+
+    Returns (cost_text, cost_value) or (None, None) if no cost found.
+    """
+    page_text = await page.inner_text("body")
+
+    # Look for cost patterns: "Costo: € X,XX" or "Importo: X,XX" or "EUR X.XX"
+    import re
+    patterns = [
+        r'[Cc]osto[:\s]+[€EUR\s]*([\d.,]+)',
+        r'[Ii]mporto[:\s]+[€EUR\s]*([\d.,]+)',
+        r'[Pp]rezzo[:\s]+[€EUR\s]*([\d.,]+)',
+        r'€\s*([\d.,]+)',
+        r'EUR\s*([\d.,]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_text)
+        if match:
+            cost_text = match.group(0).strip()
+            cost_val = match.group(1).replace('.', '').replace(',', '.')
+            try:
+                return cost_text, float(cost_val)
+            except ValueError:
+                return cost_text, 0.0
+
+    return None, None
+
+
+async def _handle_cost_confirmation(page, page_logger, auto_confirm=False):
+    """Handle the cost confirmation page in Ispezioni Ipotecarie.
+
+    Returns:
+        dict with keys: confirmed (bool), cost_text, cost_value, error
+    """
+    await page_logger.log(page, "cost_confirmation")
+
+    cost_text, cost_value = await _extract_cost_from_page(page)
+
+    if cost_text:
+        log.info("Costo rilevato: [yellow]%s[/yellow] (€%.2f)", cost_text, cost_value or 0)
+
+    # Check if there's a confirmation button
+    conferma_btn = page.locator("input[value='Conferma']")
+    if await conferma_btn.count() == 0:
+        conferma_btn = page.locator("button:has-text('Conferma')")
+    if await conferma_btn.count() == 0:
+        conferma_btn = page.locator("input[type='submit'][value*='onferma']")
+
+    if await conferma_btn.count() == 0:
+        # No confirmation page — might be a free query or already confirmed
+        return {"confirmed": True, "cost_text": cost_text, "cost_value": cost_value}
+
+    if not auto_confirm:
+        log.warning("Conferma costo richiesta: %s — usa --yes per auto-approvare", cost_text or "importo sconosciuto")
+        return {
+            "confirmed": False,
+            "cost_text": cost_text,
+            "cost_value": cost_value,
+            "error": f"Cost confirmation required: {cost_text or 'unknown amount'}. Use --yes to auto-approve.",
+        }
+
+    # Auto-confirm
+    log.info("Auto-conferma costo: %s", cost_text)
+    await conferma_btn.first.click()
+    await page.wait_for_load_state("networkidle", timeout=30000)
+    await page_logger.log(page, "cost_confirmed")
+
+    return {"confirmed": True, "cost_text": cost_text, "cost_value": cost_value}
+
+
+async def run_ispezione_ipotecaria(
+    page,
+    provincia,
+    comune=None,
+    tipo_ricerca="immobile",
+    codice_fiscale=None,
+    identificativo=None,
+    foglio=None,
+    particella=None,
+    numero_nota=None,
+    anno_nota=None,
+    tipo_catasto="T",
+    auto_confirm=False,
+):
+    """Execute an Ispezione Ipotecaria (paid inspection) on SISTER.
+
+    tipo_ricerca: 'immobile', 'persona_fisica', 'persona_giuridica', 'nota'
+    auto_confirm: if True, automatically confirm cost without prompting
+    """
+    import os
+    time0 = time.time()
+    page_logger = PageLogger("ispezione_ipotecaria")
+
+    menu_map = {
+        "immobile": "Immobile",
+        "persona_fisica": "Persona fisica",
+        "persona_giuridica": "Persona giuridica",
+        "nota": "Nota",
+    }
+    menu_link = menu_map.get(tipo_ricerca, "Immobile")
+    log.info("[bold]Ispezione Ipotecaria[/bold] tipo=%s %s/%s", tipo_ricerca, provincia, comune or "")
+
+    # Navigate to Ispezioni and select the search type
+    await _navigate_to_ispezioni_ipotecarie(page, page_logger, provincia, menu_link)
+
+    # Fill search form based on tipo_ricerca
+    if tipo_ricerca == "immobile":
+        try:
+            await page.locator("select[name='tipoCatasto']").select_option(tipo_catasto)
+        except Exception:
+            pass
+
+        for sel in ["select[name='comuneCat']", "select[name='denomComune']"]:
+            if await page.locator(sel).count() > 0:
+                cv = await find_best_option_match(page, sel, comune or "")
+                if cv:
+                    await page.locator(sel).select_option(cv)
+                break
+
+        if foglio:
+            f = page.locator("input[name='foglio']")
+            if await f.count() > 0:
+                await f.fill(str(foglio))
+        if particella:
+            for pn in ["input[name='particella1']", "input[name='particella']"]:
+                p = page.locator(pn)
+                if await p.count() > 0:
+                    await p.fill(str(particella))
+                    break
+
+    elif tipo_ricerca == "persona_fisica":
+        if codice_fiscale:
+            # Try CF radio + field
+            cf_radio = page.locator("input[name='selDatiAna'][value='CF']")
+            if await cf_radio.count() > 0:
+                await cf_radio.click()
+            cf_field = page.locator("input[name='cod_fisc_pf']")
+            if await cf_field.count() == 0:
+                cf_field = page.locator("input[name='codFiscale']")
+            if await cf_field.count() > 0:
+                await cf_field.fill(codice_fiscale.upper())
+
+    elif tipo_ricerca == "persona_giuridica":
+        if identificativo:
+            cf_radio = page.locator("input[name='selCfDn'][value='CF_PNF']")
+            if await cf_radio.count() > 0:
+                await cf_radio.click()
+            cf_field = page.locator("input[name='cod_fisc']")
+            if await cf_field.count() == 0:
+                cf_field = page.locator("input[name='codFiscale']")
+            if await cf_field.count() > 0:
+                await cf_field.fill(identificativo.upper())
+
+    elif tipo_ricerca == "nota":
+        if numero_nota:
+            nota_field = page.locator("input[name='numNota']")
+            if await nota_field.count() == 0:
+                nota_field = page.locator("input[name='nota']")
+            if await nota_field.count() > 0:
+                await nota_field.fill(str(numero_nota))
+        if anno_nota:
+            anno_field = page.locator("input[name='annoNota']")
+            if await anno_field.count() == 0:
+                anno_field = page.locator("input[name='anno']")
+            if await anno_field.count() > 0:
+                await anno_field.fill(str(anno_nota))
+
+    # Fill richiedente
+    per_conto_di = os.getenv("ADE_USERNAME", "")
+    await _fill_richiedente_motivo(page, motivo="Ispezione ipotecaria", per_conto_di=per_conto_di)
+
+    # Submit the search
+    log.info("Submitting ispezione ipotecaria...")
+    ricerca_btn = page.locator("input[name='ricerca'][value='Ricerca']")
+    if await ricerca_btn.count() == 0:
+        ricerca_btn = page.locator("input[type='submit'][value='Ricerca']")
+    await ricerca_btn.click()
+    await page.wait_for_load_state("networkidle", timeout=60000)
+    await page_logger.log(page, "risultati_pre_conferma")
+
+    # Check for "no results"
+    page_text = await page.inner_text("body")
+    if "NESSUNA CORRISPONDENZA TROVATA" in page_text:
+        elapsed = time.time() - time0
+        log.warning("Nessuna corrispondenza (%.1fs)", elapsed)
+        return {
+            "tipo_ricerca": tipo_ricerca, "provincia": provincia,
+            "risultati": [], "total_results": 0, "cost": None,
+            "error": "NESSUNA CORRISPONDENZA TROVATA",
+        }
+
+    # Handle cost confirmation
+    cost_result = await _handle_cost_confirmation(page, page_logger, auto_confirm=auto_confirm)
+
+    if not cost_result["confirmed"]:
+        elapsed = time.time() - time0
+        return {
+            "tipo_ricerca": tipo_ricerca, "provincia": provincia,
+            "risultati": [], "total_results": 0,
+            "cost": {"text": cost_result.get("cost_text"), "value": cost_result.get("cost_value")},
+            "confirmed": False,
+            "error": cost_result.get("error", "Cost confirmation required"),
+        }
+
+    # Extract results after confirmation
+    results = _extract_result_tables(await page.content())
+    elapsed = time.time() - time0
+    log.info("[green]Ispezione ipotecaria completata[/green] in %.1fs — %d risultati, costo: %s",
+             elapsed, len(results), cost_result.get("cost_text", "N/A"))
+
+    return {
+        "tipo_ricerca": tipo_ricerca, "provincia": provincia,
+        "risultati": results, "total_results": len(results),
+        "cost": {"text": cost_result.get("cost_text"), "value": cost_result.get("cost_value")},
+        "confirmed": True,
+    }
+
+
+async def run_ispezioni_ipotecarie_stato(page):
+    """Check automation status (Stato dell'automazione) in Ispezioni Ipotecarie."""
+    page_logger = PageLogger("ispezioni_stato")
+    log.info("[bold]Stato automazione ispezioni[/bold]")
+
+    # This is typically an info page — navigate and extract content
+    await _navigate_to_scelta_servizio(page, page_logger)
+    # Navigate to Ispezioni via "Passa a Ispezioni"
+    await page.get_by_role("link", name="Passa a Ispezioni", exact=True).click()
+    await page.wait_for_load_state("networkidle", timeout=30000)
+
+    # Click Conferma Lettura
+    conferma = page.get_by_role("link", name="Conferma Lettura")
+    if await conferma.count() > 0:
+        await conferma.click()
+        await page.wait_for_load_state("networkidle", timeout=30000)
+
+    # Click "Stato dell'automazione"
+    stato_link = page.get_by_role("link", name="Stato dell'automazione")
+    if await stato_link.count() > 0:
+        await stato_link.click()
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page_logger.log(page, "stato_automazione")
+
+    results = _extract_result_tables(await page.content())
+    return {"risultati": results, "total_results": len(results)}
+
+
+async def run_ispezioni_ipotecarie_elenchi(page):
+    """Retrieve billed/accounted lists (Elenchi contabilizzati) from Ispezioni Ipotecarie."""
+    page_logger = PageLogger("ispezioni_elenchi")
+    log.info("[bold]Elenchi contabilizzati[/bold]")
+
+    await _navigate_to_scelta_servizio(page, page_logger)
+    await page.get_by_role("link", name="Passa a Ispezioni", exact=True).click()
+    await page.wait_for_load_state("networkidle", timeout=30000)
+
+    conferma = page.get_by_role("link", name="Conferma Lettura")
+    if await conferma.count() > 0:
+        await conferma.click()
+        await page.wait_for_load_state("networkidle", timeout=30000)
+
+    elenchi_link = page.get_by_role("link", name="Elenchi contabilizzati")
+    if await elenchi_link.count() > 0:
+        await elenchi_link.click()
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page_logger.log(page, "elenchi_contabilizzati")
+
+    results = _extract_result_tables(await page.content())
+    return {"risultati": results, "total_results": len(results)}
+
+
 async def extract_all_sezioni(page: Page, tipo_catasto: str = "T", max_province: int = 200) -> list:
     """
     Estrae tutte le sezioni per tutte le province e comuni d'Italia.
