@@ -2,7 +2,7 @@
 {% block page_title %}Query Forms{% endblock %}
 
 {% macro render_grouped_form(form_group, is_first=False) %}
-<div class="tab-pane fade {% if is_first %}show active{% endif %}" id="form-group-{{ form_group.id }}" role="tabpanel">
+<div class="tab-pane fade {% if is_first %}show active{% endif %}" id="form-group-{{ form_group.id }}" role="tabpanel" aria-labelledby="tab-{{ form_group.id }}">
     <div class="card border-0 shadow-sm">
         <div class="card-header">
             <h4 class="mb-0">
@@ -69,138 +69,9 @@
                             {% endfor %}
                         </select>
                         {% elif param.input_type == 'textarea' and param.name == 'csv_data' %}
-                        {# Hidden textarea holds the raw CSV data #}
+                        {# Batch CSV data is handled by the global batch panel, not per-form #}
                         <textarea class="d-none" id="param-{{ form_group.id }}-{{ param.name }}"
                                   name="{{ param.name }}"></textarea>
-                        <input type="file" id="file-input-{{ form_group.id }}" accept=".csv,.txt,.json,.xlsx,.xls" class="d-none"
-                               onchange="loadDataFile(this, '{{ form_group.id }}', '{{ param.name }}')">
-
-                        {# ===== Multi-step batch wizard ===== #}
-                        <div id="batch-wizard" class="mt-2">
-
-                            {# Step indicator #}
-                            <div class="d-flex mb-3 gap-1" id="batch-steps">
-                                <span class="badge bg-primary" id="batch-step-badge-1">1. Import</span>
-                                <span class="badge bg-secondary" id="batch-step-badge-2">2. Map</span>
-                                <span class="badge bg-secondary" id="batch-step-badge-3">3. Validate</span>
-                                <span class="badge bg-secondary" id="batch-step-badge-4">4. Confirm</span>
-                                <span class="badge bg-secondary" id="batch-step-badge-5">5. Submit</span>
-                            </div>
-
-                            {# Step 1: Import #}
-                            <div id="batch-step-1" class="batch-step">
-                                <div id="dropzone-{{ form_group.id }}"
-                                     class="border border-2 border-dashed rounded p-4 text-center"
-                                     style="min-height: 160px; cursor: pointer;"
-                                     ondragover="event.preventDefault(); this.classList.add('border-primary', 'bg-light');"
-                                     ondragleave="this.classList.remove('border-primary', 'bg-light');"
-                                     ondrop="handleFileDrop(event, '{{ form_group.id }}', '{{ param.name }}'); batchWizard.onDataLoaded();"
-                                     onclick="document.getElementById('file-input-{{ form_group.id }}').click();">
-                                    <div id="dropzone-hint-{{ form_group.id }}">
-                                        <i class="fas fa-cloud-upload-alt fa-2x text-muted mb-2"></i>
-                                        <p class="mb-1 fw-semibold">Drop file here or click to browse</p>
-                                        <p class="text-muted small mb-0">CSV, JSON, XLSX &mdash; or paste data</p>
-                                    </div>
-                                </div>
-                                <div id="csv-file-info-{{ form_group.id }}" class="mt-2 d-none">
-                                    <span class="badge bg-success me-2"><i class="fas fa-file me-1"></i><span id="csv-file-name-{{ form_group.id }}"></span></span>
-                                    <span class="text-muted small" id="csv-row-count-{{ form_group.id }}"></span>
-                                    <button type="button" class="btn btn-link btn-sm text-danger p-0 ms-2" onclick="batchWizard.reset()">
-                                        <i class="fas fa-times"></i> Clear
-                                    </button>
-                                </div>
-                                <div class="mt-3 text-end">
-                                    <button type="button" class="btn btn-primary btn-sm" id="batch-btn-to-step2" disabled onclick="batchWizard.goTo(2)">
-                                        Next: Map Columns <i class="fas fa-arrow-right ms-1"></i>
-                                    </button>
-                                </div>
-                            </div>
-
-                            {# Step 2: Map columns #}
-                            <div id="batch-step-2" class="batch-step d-none">
-                                <div class="card bg-light mb-3">
-                                    <div class="card-body">
-                                        <h6 class="mb-3"><i class="fas fa-columns me-2"></i>Map your columns to API fields</h6>
-                                        <div id="batch-mapping-table" class="table-responsive">
-                                            <table class="table table-sm">
-                                                <thead><tr><th>Your Column</th><th>Sample Values</th><th><i class="fas fa-arrow-right"></i></th><th>API Field</th></tr></thead>
-                                                <tbody id="batch-mapping-rows"></tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="d-flex justify-content-between">
-                                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="batchWizard.goTo(1)">
-                                        <i class="fas fa-arrow-left me-1"></i> Back
-                                    </button>
-                                    <button type="button" class="btn btn-primary btn-sm" onclick="batchWizard.goTo(3)">
-                                        Next: Validate <i class="fas fa-arrow-right ms-1"></i>
-                                    </button>
-                                </div>
-                            </div>
-
-                            {# Step 3: Validate #}
-                            <div id="batch-step-3" class="batch-step d-none">
-                                <div id="batch-validation-summary" class="mb-3"></div>
-                                <div class="accordion mb-3">
-                                    <div class="accordion-item">
-                                        <h2 class="accordion-header">
-                                            <button class="accordion-button py-2" type="button"
-                                                    data-bs-toggle="collapse" data-bs-target="#batch-validate-table-wrap">
-                                                <i class="fas fa-table me-2"></i>Data Preview
-                                            </button>
-                                        </h2>
-                                        <div id="batch-validate-table-wrap" class="accordion-collapse collapse show">
-                                            <div class="accordion-body p-0">
-                                                <div id="csv-table-{{ form_group.id }}"></div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="d-flex justify-content-between">
-                                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="batchWizard.goTo(2)">
-                                        <i class="fas fa-arrow-left me-1"></i> Back
-                                    </button>
-                                    <button type="button" class="btn btn-primary btn-sm" id="batch-btn-to-step4" onclick="batchWizard.goTo(4)">
-                                        Next: Confirm <i class="fas fa-arrow-right ms-1"></i>
-                                    </button>
-                                </div>
-                            </div>
-
-                            {# Step 4: Confirm #}
-                            <div id="batch-step-4" class="batch-step d-none">
-                                <div class="card mb-3">
-                                    <div class="card-body">
-                                        <h6><i class="fas fa-check-double me-2"></i>Confirm submission</h6>
-                                        <div id="batch-confirm-summary"></div>
-                                        <div class="form-check mt-3">
-                                            <input class="form-check-input" type="checkbox" id="batch-skip-errors" checked>
-                                            <label class="form-check-label" for="batch-skip-errors">
-                                                Skip rows with validation errors
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="d-flex justify-content-between">
-                                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="batchWizard.goTo(3)">
-                                        <i class="fas fa-arrow-left me-1"></i> Back
-                                    </button>
-                                    <button type="button" class="btn btn-success btn-sm" onclick="batchWizard.submit()">
-                                        <i class="fas fa-paper-plane me-1"></i> Submit <span id="batch-submit-count"></span> Queries
-                                    </button>
-                                </div>
-                            </div>
-
-                            {# Step 5: Results #}
-                            <div id="batch-step-5" class="batch-step d-none">
-                                <div id="batch-results-area"></div>
-                                <div class="mt-3">
-                                    <button type="button" class="btn btn-outline-primary btn-sm" onclick="batchWizard.reset()">
-                                        <i class="fas fa-redo me-1"></i> Start New Batch
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
                         {% elif param.input_type == 'textarea' %}
                         <textarea class="form-control font-monospace"
                                   id="param-{{ form_group.id }}-{{ param.name }}"
@@ -289,9 +160,12 @@
                     <div id="nav-single" class="nav flex-column nav-pills" role="tablist">
                         {% for fg in single_step_groups %}
                         <button class="nav-link text-start {% if loop.first %}active{% endif %} query-nav-btn"
+                                id="tab-{{ fg.id }}"
                                 data-bs-toggle="pill"
                                 data-bs-target="#form-group-{{ fg.id }}"
-                                type="button" role="tab" data-category="single">
+                                aria-controls="form-group-{{ fg.id }}"
+                                type="button" role="tab" data-category="single"
+                                aria-selected="{% if loop.first %}true{% else %}false{% endif %}">
                             <i class="fas {{ fg.icon }} me-2 text-{{ fg.color }}"></i>
                             {{ fg.name }}
                         </button>
@@ -302,10 +176,13 @@
                     <div id="nav-workflow" class="nav flex-column nav-pills d-none" role="tablist">
                         {% for fg in workflow_groups %}
                         <button class="nav-link text-start query-nav-btn"
+                                id="tab-{{ fg.id }}"
                                 data-bs-toggle="pill"
                                 data-bs-target="#form-group-{{ fg.id }}"
+                                aria-controls="form-group-{{ fg.id }}"
                                 data-flowchart="{{ fg.flowchart or '' }}"
                                 type="button" role="tab" data-category="workflow"
+                                aria-selected="false"
                                 onclick="showSidebarFlowchart('{{ fg.flowchart or '' }}')">
                             <i class="fas {{ fg.icon }} me-2 text-{{ fg.color }}"></i>
                             {{ fg.name }}
@@ -367,6 +244,10 @@
                         <h5 class="mb-0"><i class="fas fa-file-csv me-2"></i>Batch Import</h5>
                     </div>
                     <div class="card-body">
+                        <form id="form-batch" class="sister-form" data-form-group="batch">
+                        {# Hidden command field — updated dynamically by JS based on active tab #}
+                        <input type="hidden" id="param-batch-command" name="command" value="search">
+                        <input type="hidden" name="endpoint-batch" value="batch" data-path="/web/api/batch">
                         {# Hidden fields for batch data #}
                         <textarea class="d-none" id="param-batch-csv_data" name="csv_data"></textarea>
                         <input type="file" id="file-input-batch" accept=".csv,.txt,.json,.xlsx,.xls" class="d-none"
@@ -492,6 +373,7 @@
                                 </button>
                             </div>
                         </div>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -500,6 +382,9 @@
 </div>
 
 <script>
+// Form group IDs that support batch mode
+var BATCH_SUPPORTED = new Set(['property-search', 'person-search', 'company-search', 'property-list', 'address-search', 'partita-search']);
+
 function toggleQueryCategory(category) {
     document.getElementById('nav-single').classList.toggle('d-none', category !== 'single');
     document.getElementById('nav-workflow').classList.toggle('d-none', category !== 'workflow');
@@ -507,6 +392,20 @@ function toggleQueryCategory(category) {
     // Hide flowchart when switching to single step
     if (category === 'single') {
         document.getElementById('sidebar-flowchart').classList.add('d-none');
+    }
+
+    // Batch mode only available for single-step supported groups
+    var modeToggle = document.querySelector('[aria-label="Job mode"]');
+    if (modeToggle) {
+        modeToggle.style.display = (category === 'single') ? '' : 'none';
+    }
+    // Reset to single job mode when switching to workflow
+    if (category === 'workflow') {
+        var singleRadio = document.getElementById('mode-single');
+        if (singleRadio && !singleRadio.checked) {
+            singleRadio.checked = true;
+            toggleQueryMode('single');
+        }
     }
 
     // Activate the first nav button in the selected category
