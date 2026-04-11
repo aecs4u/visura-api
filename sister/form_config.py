@@ -2,6 +2,12 @@
 
 Defines the query forms rendered on the /web/forms page. Each FormGroup
 maps to one or more sister API endpoints.
+
+Categories:
+  - "single": Single-step queries (search, soggetto, azienda, etc.)
+  - "workflow": Multi-step workflow presets (due-diligence, patrimonio, etc.)
+
+The "batch" mode is a toggle on any form group, not a separate group.
 """
 
 from __future__ import annotations
@@ -41,8 +47,10 @@ class FormGroup:
     params: list[EndpointParam]
     endpoints: list[EndpointOption]
     default_endpoint_id: str = ""
-    category: str = "general"
+    category: str = "single"  # "single" or "workflow"
     available: bool = True
+    # For workflows: the SVG flowchart name (without .svg)
+    flowchart: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -103,19 +111,29 @@ _PROVINCIA_OPT = EndpointParam(
     required=False, help_text="Omit for nationwide search",
 )
 
+_FOGLIO_OPT = EndpointParam(
+    name="foglio", label="Sheet", placeholder="Required for property presets",
+    required=False,
+)
+
+_PARTICELLA_OPT = EndpointParam(
+    name="particella", label="Parcel", placeholder="Required for property presets",
+    required=False,
+)
+
 
 # ---------------------------------------------------------------------------
-# Form group definitions
+# Single-step form groups
 # ---------------------------------------------------------------------------
 
-FORM_GROUPS: list[FormGroup] = [
+SINGLE_STEP_GROUPS: list[FormGroup] = [
     FormGroup(
         id="property-search",
         name="Property Search",
-        description="Search for properties by cadastral coordinates (sheet + parcel). Optionally retrieve owner information.",
+        description="Search for properties by cadastral coordinates (sheet + parcel).",
         icon="fa-search",
         color="primary",
-        category="property",
+        category="single",
         params=[_TIPO_CATASTO, _PROVINCIA, _COMUNE, _SEZIONE, _FOGLIO, _PARTICELLA, _SUBALTERNO],
         endpoints=[
             EndpointOption(
@@ -126,7 +144,7 @@ FORM_GROUPS: list[FormGroup] = [
             EndpointOption(
                 id="intestati", name="Owner Lookup",
                 path="/visura/intestati", method="POST",
-                description="Get owners for a specific property (Fase 2). Requires tipo_catasto and subalterno for buildings.",
+                description="Get owners for a specific property (Fase 2)",
             ),
         ],
         default_endpoint_id="visura",
@@ -135,10 +153,10 @@ FORM_GROUPS: list[FormGroup] = [
     FormGroup(
         id="person-search",
         name="Person Search",
-        description="National search by codice fiscale. Find all properties owned by a person across Italy.",
+        description="National search by codice fiscale.",
         icon="fa-user",
         color="info",
-        category="subject",
+        category="single",
         params=[
             EndpointParam(
                 name="codice_fiscale", label="Codice Fiscale",
@@ -152,7 +170,7 @@ FORM_GROUPS: list[FormGroup] = [
             EndpointOption(
                 id="soggetto", name="Person Search",
                 path="/visura/soggetto", method="POST",
-                description="National search by codice fiscale (Persona Fisica)",
+                description="National search by codice fiscale",
             ),
         ],
         default_endpoint_id="soggetto",
@@ -161,10 +179,10 @@ FORM_GROUPS: list[FormGroup] = [
     FormGroup(
         id="company-search",
         name="Company Search",
-        description="Search by P.IVA or company name. Find all properties owned by a legal entity.",
+        description="Search by P.IVA or company name.",
         icon="fa-building",
         color="warning",
-        category="subject",
+        category="single",
         params=[
             EndpointParam(
                 name="identificativo", label="P.IVA or Company Name",
@@ -179,7 +197,7 @@ FORM_GROUPS: list[FormGroup] = [
             EndpointOption(
                 id="persona-giuridica", name="Company Search",
                 path="/visura/persona-giuridica", method="POST",
-                description="Search by P.IVA or denomination (Persona Giuridica)",
+                description="Search by P.IVA or denomination",
             ),
         ],
         default_endpoint_id="persona-giuridica",
@@ -188,19 +206,19 @@ FORM_GROUPS: list[FormGroup] = [
     FormGroup(
         id="property-list",
         name="Property List",
-        description="List all properties in a municipality, optionally filtered by sheet number.",
+        description="List all properties in a municipality.",
         icon="fa-list",
         color="success",
-        category="property",
+        category="single",
         params=[_PROVINCIA, _COMUNE, _TIPO_CATASTO_TF, EndpointParam(
             name="foglio", label="Sheet (Foglio)", placeholder="Optional — filter by sheet",
-            required=False, help_text="Leave blank to list all",
+            required=False,
         ), _SEZIONE],
         endpoints=[
             EndpointOption(
                 id="elenco-immobili", name="Property List",
                 path="/visura/elenco-immobili", method="POST",
-                description="List all properties in a municipality (Elenco Immobili)",
+                description="List all properties in a municipality",
             ),
         ],
         default_endpoint_id="elenco-immobili",
@@ -209,10 +227,10 @@ FORM_GROUPS: list[FormGroup] = [
     FormGroup(
         id="address-search",
         name="Address Search",
-        description="Search properties by street address within a municipality.",
+        description="Search properties by street address.",
         icon="fa-map-marker-alt",
         color="danger",
-        category="location",
+        category="single",
         params=[
             _PROVINCIA, _COMUNE, _TIPO_CATASTO_TF,
             EndpointParam(
@@ -238,7 +256,7 @@ FORM_GROUPS: list[FormGroup] = [
         description="Search by partita catastale number.",
         icon="fa-hashtag",
         color="secondary",
-        category="property",
+        category="single",
         params=[
             _PROVINCIA, _COMUNE, _TIPO_CATASTO_TF,
             EndpointParam(
@@ -256,92 +274,129 @@ FORM_GROUPS: list[FormGroup] = [
         ],
         default_endpoint_id="partita",
     ),
+]
 
+
+# ---------------------------------------------------------------------------
+# Workflow (multi-step) form groups
+# ---------------------------------------------------------------------------
+
+WORKFLOW_GROUPS: list[FormGroup] = [
     FormGroup(
-        id="workflow",
-        name="Workflow",
-        description="Run a multi-phase investigation workflow with preset configurations.",
-        icon="fa-project-diagram",
-        color="dark",
-        category="advanced",
-        params=[
-            EndpointParam(
-                name="preset", label="Preset", placeholder="Select workflow",
-                input_type="select", required=True,
-                options=[
-                    ("due-diligence", "Due Diligence — search → intestati → ispezioni"),
-                    ("patrimonio", "Asset Investigation — soggetto → drill-down"),
-                    ("fondiario", "Land Survey — elenco → mappa → fiduciali → originali"),
-                    ("aziendale", "Corporate Audit — azienda → drill-down"),
-                    ("storico", "Parcel History — search → intestati → nota → ispezioni"),
-                ],
-                help_text="Select a predefined workflow",
-            ),
-            _PROVINCIA, _COMUNE,
-            EndpointParam(name="foglio", label="Sheet", placeholder="Required for property presets", required=False),
-            EndpointParam(name="particella", label="Parcel", placeholder="Required for property presets", required=False),
-            EndpointParam(name="codice_fiscale", label="Codice Fiscale", placeholder="For patrimonio preset", required=False),
-            EndpointParam(name="identificativo", label="P.IVA / Company", placeholder="For aziendale preset", required=False),
-        ],
-        endpoints=[
-            EndpointOption(
-                id="workflow", name="Run Workflow",
-                path="/visura/workflow", method="POST",
-                description="Execute a multi-phase investigation workflow",
-            ),
-        ],
-        default_endpoint_id="workflow",
-        available=True,
+        id="wf-due-diligence",
+        name="Due Diligence",
+        description="Real estate due diligence: search → intestati → ispezioni",
+        icon="fa-file-contract",
+        color="primary",
+        category="workflow",
+        flowchart="due-diligence",
+        params=[_PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO, _SEZIONE],
+        endpoints=[EndpointOption(
+            id="workflow-due-diligence", name="Due Diligence",
+            path="/visura", method="POST",
+            description="search → intestati → ispezioni",
+        )],
+        default_endpoint_id="workflow-due-diligence",
     ),
 
     FormGroup(
-        id="batch",
-        name="Batch Upload",
-        description="Submit multiple queries from CSV. Paste CSV rows below — one query per line.",
-        icon="fa-file-csv",
-        color="dark",
-        category="advanced",
+        id="wf-patrimonio",
+        name="Asset Investigation",
+        description="Find all properties owned by a person across Italy.",
+        icon="fa-search-dollar",
+        color="info",
+        category="workflow",
+        flowchart="patrimonio",
         params=[
-            EndpointParam(
-                name="command", label="Query Type", placeholder="Select type",
-                input_type="select", required=True,
-                options=[
-                    ("search", "Property Search"),
-                    ("intestati", "Owner Lookup"),
-                    ("soggetto", "Person Search (CF)"),
-                    ("persona-giuridica", "Company Search (P.IVA)"),
-                    ("elenco-immobili", "Property List"),
-                    ("indirizzo", "Address Search"),
-                    ("partita", "Partita Search"),
-                    ("workflow-due-diligence", "Workflow: Due Diligence"),
-                    ("workflow-patrimonio", "Workflow: Asset Investigation"),
-                    ("workflow-fondiario", "Workflow: Land Survey"),
-                    ("workflow-aziendale", "Workflow: Corporate Audit"),
-                    ("workflow-storico", "Workflow: Parcel History"),
-                ],
-                help_text="All rows will use this query type",
-            ),
-            EndpointParam(
-                name="csv_data", label="CSV Data", placeholder="provincia,comune,foglio,particella,tipo_catasto\nRoma,ROMA,100,50,T\nTrieste,TRIESTE,9,166,F",
-                input_type="textarea", required=True,
-                help_text="First line = header, subsequent lines = data rows. Required columns depend on the query type.",
-            ),
+            EndpointParam(name="codice_fiscale", label="Codice Fiscale",
+                          placeholder="e.g. RSSMRI85E28H501E", example="RSSMRI85E28H501E"),
+            _TIPO_CATASTO_TFE, _PROVINCIA_OPT,
         ],
-        endpoints=[
-            EndpointOption(
-                id="batch", name="Batch Submit",
-                path="/web/api/batch", method="POST",
-                description="Submit all rows as queued requests",
-            ),
+        endpoints=[EndpointOption(
+            id="workflow-patrimonio", name="Asset Investigation",
+            path="/visura/soggetto", method="POST",
+            description="soggetto (nazionale) → drill-down",
+        )],
+        default_endpoint_id="workflow-patrimonio",
+    ),
+
+    FormGroup(
+        id="wf-fondiario",
+        name="Land Survey",
+        description="Complete cadastral data for a zone: elenco → mappa → fiduciali → originali",
+        icon="fa-mountain",
+        color="success",
+        category="workflow",
+        flowchart="fondiario",
+        params=[_PROVINCIA, _COMUNE, _FOGLIO_OPT, _TIPO_CATASTO_TF],
+        endpoints=[EndpointOption(
+            id="workflow-fondiario", name="Land Survey",
+            path="/visura/elenco-immobili", method="POST",
+            description="elenco → mappa → fiduciali → originali",
+        )],
+        default_endpoint_id="workflow-fondiario",
+    ),
+
+    FormGroup(
+        id="wf-aziendale",
+        name="Corporate Audit",
+        description="Find all properties owned by a company.",
+        icon="fa-briefcase",
+        color="warning",
+        category="workflow",
+        flowchart="aziendale",
+        params=[
+            EndpointParam(name="identificativo", label="P.IVA / Company",
+                          placeholder="e.g. 02471840997", example="02471840997"),
+            _TIPO_CATASTO_TFE, _PROVINCIA_OPT,
         ],
-        default_endpoint_id="batch",
+        endpoints=[EndpointOption(
+            id="workflow-aziendale", name="Corporate Audit",
+            path="/visura/persona-giuridica", method="POST",
+            description="azienda → drill-down",
+        )],
+        default_endpoint_id="workflow-aziendale",
+    ),
+
+    FormGroup(
+        id="wf-storico",
+        name="Parcel History",
+        description="Full historical record: search → intestati → nota → ispezioni → originali",
+        icon="fa-history",
+        color="dark",
+        category="workflow",
+        flowchart="storico",
+        params=[_PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO],
+        endpoints=[EndpointOption(
+            id="workflow-storico", name="Parcel History",
+            path="/visura", method="POST",
+            description="search → intestati → nota → ispezioni → originali",
+        )],
+        default_endpoint_id="workflow-storico",
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Combined list
+# ---------------------------------------------------------------------------
+
+FORM_GROUPS: list[FormGroup] = SINGLE_STEP_GROUPS + WORKFLOW_GROUPS
 
 
 def get_available_form_groups() -> list[FormGroup]:
     """Return form groups that are available."""
     return [fg for fg in FORM_GROUPS if fg.available]
+
+
+def get_single_step_groups() -> list[FormGroup]:
+    """Return single-step form groups."""
+    return [fg for fg in FORM_GROUPS if fg.available and fg.category == "single"]
+
+
+def get_workflow_groups() -> list[FormGroup]:
+    """Return workflow (multi-step) form groups."""
+    return [fg for fg in FORM_GROUPS if fg.available and fg.category == "workflow"]
 
 
 def get_form_group_by_id(group_id: str) -> Optional[FormGroup]:

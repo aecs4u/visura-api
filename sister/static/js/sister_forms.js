@@ -872,6 +872,27 @@
     },
 
     _getCommand: function() {
+      // Get the command from the currently active form tab
+      const activePane = document.querySelector('.tab-pane.show.active');
+      if (activePane) {
+        const id = activePane.id.replace('form-group-', '');
+        // Map form group IDs to API command names
+        const idToCommand = {
+          'property-search': 'search',
+          'person-search': 'soggetto',
+          'company-search': 'persona-giuridica',
+          'property-list': 'elenco-immobili',
+          'address-search': 'indirizzo',
+          'partita-search': 'partita',
+          'wf-due-diligence': 'workflow-due-diligence',
+          'wf-patrimonio': 'workflow-patrimonio',
+          'wf-fondiario': 'workflow-fondiario',
+          'wf-aziendale': 'workflow-aziendale',
+          'wf-storico': 'workflow-storico',
+        };
+        return idToCommand[id] || 'search';
+      }
+      // Fallback to batch command select if it exists
       const sel = document.getElementById('param-batch-command');
       return sel ? sel.value : 'search';
     },

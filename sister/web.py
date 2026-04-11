@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from .database import count_responses, find_responses, get_response
-from .form_config import get_available_form_groups
+from .form_config import get_available_form_groups, get_single_step_groups, get_workflow_groups
 
 logger = logging.getLogger("sister")
 
@@ -101,10 +101,11 @@ async def web_index(request: Request, user=Depends(_require_auth)):
 async def web_forms(request: Request, user=Depends(_require_auth)):
     """Query submission forms."""
     theme = _get_theme(request)
-    form_groups = get_available_form_groups()
     return theme.render(
         "sister/forms.html", request, user=user,
-        form_groups=form_groups,
+        form_groups=get_available_form_groups(),
+        single_step_groups=get_single_step_groups(),
+        workflow_groups=get_workflow_groups(),
     )
 
 
