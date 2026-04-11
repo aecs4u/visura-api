@@ -488,6 +488,22 @@
     let errorCount = 0;
     let skippedCount = 0;
 
+    // Get the selected batch command for context-aware validation
+    const commandSelect = document.getElementById('param-batch-command');
+    const batchCommand = commandSelect ? commandSelect.value : '';
+
+    // Fields that are required (non-empty) based on the batch command
+    const REQUIRED_BY_COMMAND = {
+      'search': ['provincia', 'comune', 'foglio', 'particella'],
+      'intestati': ['provincia', 'comune', 'foglio', 'particella', 'tipo_catasto'],
+      'soggetto': ['codice_fiscale'],
+      'persona-giuridica': ['identificativo'],
+      'elenco-immobili': ['provincia', 'comune'],
+      'indirizzo': ['provincia', 'comune', 'indirizzo'],
+      'partita': ['provincia', 'comune', 'partita'],
+    };
+    const requiredFields = new Set(REQUIRED_BY_COMMAND[batchCommand] || []);
+
     for (let i = 1; i < lines.length; i++) {
       const cells = lines[i].split(',').map(c => cleanCellValue(c));
       const rowData = {};
@@ -499,11 +515,17 @@
         rowData[h] = rawVal;
         if (rawVal) allEmpty = false;
 
-        // Validate
+        // Check required fields
+        if (requiredFields.has(h) && !rawVal) {
+          rowErrors[h] = 'Required';
+          return;
+        }
+
+        // Validate with field-specific validator
         const validator = FIELD_VALIDATORS[h];
         if (validator) {
           const result = validator(rawVal);
-          if (!result.valid) {
+          if (!result.valid && (rawVal || requiredFields.has(h))) {
             rowErrors[h] = result.msg;
           } else if (result.cleaned !== undefined) {
             rowData[h] = result.cleaned;
@@ -557,7 +579,7 @@
 
     headers.forEach(h => {
       columns.push({
-        title: h,
+        title: toTitleCase(h),
         field: h,
         editor: 'input',
         headerFilter: 'input',
@@ -618,7 +640,7 @@
     // Fallback if Tabulator fails to load
     const previewDiv = document.getElementById('csv-preview-' + groupId);
     let html = '<thead class="table-light"><tr><th>#</th>';
-    headers.forEach(h => { html += '<th>' + escapeHtml(h) + '</th>'; });
+    headers.forEach(h => { html += '<th>' + escapeHtml(toTitleCase(h)) + '</th>'; });
     html += '<th>Status</th></tr></thead><tbody>';
 
     dataRows.forEach(r => {
@@ -666,6 +688,10 @@
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  function toTitleCase(str) {
+    return str.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
 })();
