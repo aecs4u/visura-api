@@ -345,11 +345,13 @@
   window.loadDataFile = function(input, groupId, paramName) {
     const file = input.files[0];
     if (!file) return;
+    console.log('[sister] loadDataFile:', groupId, file.name);
     parseFileToCSV(file, function(err, csv) {
-      if (err) {
-        alert(err);
-        return;
-      }
+      if (err) { alert(err); return; }
+      console.log('[sister] parsed CSV, length:', csv.length);
+      // Write directly to the textarea
+      const textarea = document.getElementById('param-' + groupId + '-' + paramName);
+      if (textarea) textarea.value = csv;
       setCSVData(groupId, paramName, csv, file.name);
     });
   };
@@ -359,22 +361,22 @@
     const dropzone = document.getElementById('dropzone-' + groupId);
     if (dropzone) dropzone.classList.remove('border-primary', 'bg-light');
 
-    // Check for file
     if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
       const file = event.dataTransfer.files[0];
+      console.log('[sister] handleFileDrop:', groupId, file.name);
       parseFileToCSV(file, function(err, csv) {
-        if (err) {
-          alert(err);
-          return;
-        }
+        if (err) { alert(err); return; }
+        const textarea = document.getElementById('param-' + groupId + '-' + paramName);
+        if (textarea) textarea.value = csv;
         setCSVData(groupId, paramName, csv, file.name);
       });
       return;
     }
 
-    // Check for pasted text
     const text = event.dataTransfer.getData('text');
     if (text) {
+      const textarea = document.getElementById('param-' + groupId + '-' + paramName);
+      if (textarea) textarea.value = text;
       setCSVData(groupId, paramName, text, null);
     }
   };
@@ -822,39 +824,35 @@
     _currentStep: 1,
 
     onDataLoaded: function() {
-      // Called after file drop/load — parse raw data and enable Next
-      // Retry up to 2s in case async parsing (XLSX) hasn't finished
-      var attempts = 0;
-      function tryParse() {
-        const textarea = document.getElementById('param-' + GROUP_ID + '-' + PARAM_NAME);
-        if (!textarea || !textarea.value.trim()) {
-          if (attempts++ < 10) { setTimeout(tryParse, 200); }
-          return;
-        }
+      // Called after file data has been written to the textarea
+      const textarea = document.getElementById('param-' + GROUP_ID + '-' + PARAM_NAME);
+      console.log('[sister] batchWizard.onDataLoaded, textarea value length:', textarea ? textarea.value.length : 0);
+      if (!textarea || !textarea.value.trim()) return;
 
-        const lines = textarea.value.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
-        if (lines.length < 2) {
-          if (attempts++ < 10) { setTimeout(tryParse, 200); }
-          return;
-        }
+      const lines = textarea.value.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+      if (lines.length < 2) return;
 
-        batchWizard._rawHeaders = parseCSVLine(lines[0]).map(h => h.replace(/^["']+|["']+$/g, '').trim());
-        batchWizard._rawRows = [];
-        for (let i = 1; i < lines.length; i++) {
-          const cells = parseCSVLine(lines[i]).map(c => cleanCellValue(c));
-          if (cells.some(c => c)) batchWizard._rawRows.push(cells);
-        }
-
-        const btn = document.getElementById('batch-btn-to-step2');
-        if (btn) btn.disabled = false;
-
-        // Update file info
-        const infoDiv = document.getElementById('csv-file-info-' + GROUP_ID);
-        if (infoDiv) infoDiv.classList.remove('d-none');
-        const rowCount = document.getElementById('csv-row-count-' + GROUP_ID);
-        if (rowCount) rowCount.textContent = batchWizard._rawRows.length + ' data row(s), ' + batchWizard._rawHeaders.length + ' columns';
+      batchWizard._rawHeaders = parseCSVLine(lines[0]).map(h => h.replace(/^["']+|["']+$/g, '').trim());
+      batchWizard._rawRows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cells = parseCSVLine(lines[i]).map(c => cleanCellValue(c));
+        if (cells.some(c => c)) batchWizard._rawRows.push(cells);
       }
-      setTimeout(tryParse, 100);
+
+      console.log('[sister] parsed:', batchWizard._rawHeaders.length, 'headers,', batchWizard._rawRows.length, 'rows');
+
+      const btn = document.getElementById('batch-btn-to-step2');
+      if (btn) {
+        btn.disabled = false;
+        console.log('[sister] Next button enabled');
+      } else {
+        console.warn('[sister] batch-btn-to-step2 not found!');
+      }
+
+      const infoDiv = document.getElementById('csv-file-info-' + GROUP_ID);
+      if (infoDiv) infoDiv.classList.remove('d-none');
+      const rowCount = document.getElementById('csv-row-count-' + GROUP_ID);
+      if (rowCount) rowCount.textContent = batchWizard._rawRows.length + ' data row(s), ' + batchWizard._rawHeaders.length + ' columns';
     },
 
     goTo: function(step) {
