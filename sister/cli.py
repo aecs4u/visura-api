@@ -1037,7 +1037,7 @@ def _run_step(client, label, coro):
 def workflow(
     preset: Optional[str] = typer.Option(
         None, "--preset",
-        help="Named preset: due-diligence, patrimonio, fondiario, aziendale, storico, indirizzo, cross-reference",
+        help="Named preset: due-diligence, patrimonio, fondiario, aziendale, storico, indirizzo, cross-reference, full-due-diligence, full-patrimonio, full-aziendale",
     ),
     provincia: Optional[str] = typer.Option(None, "--provincia", "-P", help="Province name"),
     comune: Optional[str] = typer.Option(None, "--comune", "-C", help="Municipality name"),

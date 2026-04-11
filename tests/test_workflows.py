@@ -841,3 +841,43 @@ class TestWorkflowCLI:
         ])
         assert result.exit_code == 0
         assert called_with.get("preset") == "fondiario"
+
+    def test_preset_forwards_budget_controls(self, monkeypatch):
+        """Verify budget flags are forwarded to client.workflow()."""
+        from typer.testing import CliRunner
+        from sister.cli import app
+        from sister.client import VisuraClient
+
+        called_with = {}
+
+        async def mock_workflow(self, **kwargs):
+            called_with.update(kwargs)
+            return {
+                "preset": kwargs.get("preset"),
+                "steps": [],
+                "summary": {"completed": 0, "failed": 0, "skipped": 0, "total_steps": 0},
+            }
+
+        monkeypatch.setattr(VisuraClient, "workflow", mock_workflow)
+        runner = CliRunner()
+        result = runner.invoke(app, [
+            "query", "workflow", "--preset", "full-due-diligence",
+            "-P", "Roma", "-C", "ROMA", "-F", "1", "-p", "1",
+            "--depth", "full",
+            "--max-owners", "15",
+            "--max-properties-per-owner", "25",
+            "--max-history", "8",
+            "--max-paid", "5",
+            "--max-steps", "200",
+            "--include-paid", "--yes",
+        ])
+        assert result.exit_code == 0
+        assert called_with.get("preset") == "full-due-diligence"
+        assert called_with.get("depth") == "full"
+        assert called_with.get("max_owners") == 15
+        assert called_with.get("max_properties_per_owner") == 25
+        assert called_with.get("max_historical_properties") == 8
+        assert called_with.get("max_paid_steps") == 5
+        assert called_with.get("max_total_steps") == 200
+        assert called_with.get("auto_confirm") is True
+        assert called_with.get("include_paid_steps") is True

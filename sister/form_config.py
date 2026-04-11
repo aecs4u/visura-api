@@ -456,7 +456,7 @@ _WORKFLOW_PAID = EndpointParam(
     name="include_paid_steps", label="Include Paid Steps", placeholder="",
     input_type="select", required=False,
     options=[("false", "No"), ("true", "Yes — include paid inspections")],
-    help_text="Enable paid ispezione ipotecaria steps (requires Deep depth).",
+    help_text="Enable paid ispezione ipotecaria steps (requires Deep or Full depth).",
 )
 
 _WORKFLOW_CONFIRM = EndpointParam(
