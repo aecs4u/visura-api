@@ -319,7 +319,9 @@
                         </label>
                         <input type="radio" class="btn-check" name="query-mode" id="mode-batch" value="batch" autocomplete="off"
                                onchange="toggleQueryMode('batch')">
-                        <label class="btn btn-outline-secondary btn-sm" for="mode-batch">
+                        <label class="btn btn-outline-secondary btn-sm" for="mode-batch"
+                               data-bs-toggle="tooltip" data-bs-placement="bottom"
+                               title="Upload a file with multiple rows to submit as a queue">
                             <i class="fas fa-layer-group me-1"></i>Batch
                         </label>
                     </div>
@@ -339,13 +341,6 @@
 
         <!-- Forms -->
         <div class="col-lg-9">
-            {# Batch mode banner (hidden by default) #}
-            <div id="batch-mode-banner" class="alert alert-info d-none mb-3">
-                <i class="fas fa-layer-group me-2"></i>
-                <strong>Batch mode:</strong> Upload a file with multiple rows to submit as a queue.
-                <button type="button" class="btn-close float-end" onclick="document.getElementById('mode-single').checked=true; toggleQueryMode('single');"></button>
-            </div>
-
             <div class="tab-content" id="form-group-tabContent">
                 {# Single step forms #}
                 {% for form_group in single_step_groups %}
@@ -519,16 +514,13 @@ function toggleQueryCategory(category) {
 
 function toggleQueryMode(mode) {
     const batchPanel = document.getElementById('batch-panel');
-    const banner = document.getElementById('batch-mode-banner');
     const singleJobContent = document.querySelectorAll('.single-job-content');
 
     if (mode === 'batch') {
         batchPanel.classList.remove('d-none');
-        banner.classList.remove('d-none');
         singleJobContent.forEach(f => f.classList.add('d-none'));
     } else {
         batchPanel.classList.add('d-none');
-        banner.classList.add('d-none');
         singleJobContent.forEach(f => f.classList.remove('d-none'));
     }
 }
@@ -549,5 +541,10 @@ function showSidebarFlowchart(flowchartName) {
         })
         .catch(() => { container.innerHTML = '<p class="text-muted small">Not available</p>'; });
 }
+
+// Initialize Bootstrap tooltips
+document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function(el) {
+    new bootstrap.Tooltip(el);
+});
 </script>
 {% endblock %}
