@@ -399,11 +399,31 @@ STEP_METADATA = {
                                       s["status"] == "completed" and s["step"] in ("nota", "ispezioni", "ispezioni_cart", "originali")
                                       for s in results)},
     "risk_score":                {"depth": "light",    "paid": False, "produces": ["risk_scores"]},
+    # Multi-hop (full depth — bounded graph expansion)
+    "property_rank":             {"depth": "full",     "paid": False, "produces": ["ranked_properties"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and (
+                                          s.get("data", {}).get("discovered_properties")
+                                          or s.get("data", {}).get("owner_entities")
+                                          or s.get("data", {}).get("drill_results")
+                                      ) for s in results)},
+    "portfolio_drill_intestati": {"depth": "full",     "paid": False, "produces": ["portfolio_intestati"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and s["step"] == "property_rank"
+                                      for s in results)},
+    "portfolio_history":         {"depth": "full",     "paid": False, "produces": ["history_results"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and s["step"] == "property_rank"
+                                      for s in results)},
+    "portfolio_ipotecaria":      {"depth": "full",     "paid": True,  "produces": ["paid_results"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and s["step"] == "property_rank"
+                                      for s in results)},
     # Paid
     "ispezione_ipotecaria":      {"depth": "deep",     "paid": True,  "produces": ["risultati"]},
 }
 
-_DEPTH_ORDER = {"light": 0, "standard": 1, "deep": 2}
+_DEPTH_ORDER = {"light": 0, "standard": 1, "deep": 2, "full": 3}
 
 WORKFLOW_PRESETS = {
     "due-diligence": {
@@ -473,6 +493,52 @@ WORKFLOW_PRESETS = {
         ],
         "requires": ["codice_fiscale", "identificativo"],
     },
+    "full-due-diligence": {
+        "description": "Multi-hop due diligence: seed parcel → owners → portfolios → selective history → encumbrances → risk scoring",
+        "steps": [
+            # Hop 0: seed parcel
+            "search", "intestati",
+            # Hop 1: expand parcel variants
+            "drill_intestati",
+            # Hop 2: expand owners
+            "owner_expand",
+            # Rank before further expansion
+            "property_rank",
+            # Hop 3: drill into owner portfolios (top ranked unseen)
+            "portfolio_drill_intestati",
+            # Hop 4: selective history on ranked properties
+            "portfolio_history", "timeline_build",
+            # Hop 5: selective paid enrichment on top-risk
+            "portfolio_ipotecaria",
+            # Final
+            "risk_score",
+        ],
+        "requires": ["provincia", "comune", "foglio", "particella"],
+    },
+    "full-patrimonio": {
+        "description": "Multi-hop portfolio: soggetto → drill-down → owners → portfolios → history → encumbrances → risk scoring",
+        "steps": [
+            "soggetto", "drill_intestati", "indirizzo_reverse",
+            "owner_expand", "property_rank",
+            "portfolio_drill_intestati",
+            "portfolio_history", "timeline_build",
+            "portfolio_ipotecaria",
+            "risk_score",
+        ],
+        "requires": ["codice_fiscale"],
+    },
+    "full-aziendale": {
+        "description": "Multi-hop corporate audit: azienda → drill-down → owners → portfolios → history → encumbrances → risk scoring",
+        "steps": [
+            "azienda", "drill_intestati", "indirizzo_reverse",
+            "owner_expand", "property_rank",
+            "portfolio_drill_intestati",
+            "portfolio_history", "timeline_build",
+            "portfolio_ipotecaria",
+            "risk_score",
+        ],
+        "requires": ["identificativo"],
+    },
 }
 
 
@@ -494,15 +560,21 @@ class WorkflowInput(BaseModel):
     indirizzo: Optional[str] = Field(None, description="Street address")
     auto_confirm: bool = Field(False, description="Auto-confirm paid service costs")
     include_paid_steps: bool = Field(False, description="Include optional paid steps (e.g. ispezione ipotecaria)")
-    depth: str = Field("standard", description="Workflow depth: light, standard, deep")
-    max_fanout: int = Field(20, ge=1, le=100, description="Max properties/owners to fan out to in enrichment steps")
+    depth: str = Field("standard", description="Workflow depth: light, standard, deep, full")
+    # Budget controls for multi-hop expansion
+    max_fanout: int = Field(20, ge=1, le=100, description="Max properties/owners to fan out to per step")
+    max_owners: int = Field(10, ge=1, le=50, description="Max owners to expand in owner_expand")
+    max_properties_per_owner: int = Field(20, ge=1, le=100, description="Max properties per owner in portfolio drill")
+    max_historical_properties: int = Field(5, ge=1, le=50, description="Max properties to run history bundle on")
+    max_paid_steps: int = Field(3, ge=0, le=20, description="Max paid step invocations (ispezione ipotecaria)")
+    max_total_steps: int = Field(100, ge=1, le=500, description="Overall circuit breaker for total step executions")
 
     @field_validator("depth", mode="before")
     @classmethod
     def validate_depth(cls, value: str) -> str:
         normalized = value.strip().lower()
-        if normalized not in {"light", "standard", "deep"}:
-            raise ValueError(f"depth must be 'light', 'standard', or 'deep', got '{value}'")
+        if normalized not in {"light", "standard", "deep", "full"}:
+            raise ValueError(f"depth must be 'light', 'standard', 'deep', or 'full', got '{value}'")
         return normalized
 
     @field_validator("preset", mode="before")

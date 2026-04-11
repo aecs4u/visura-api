@@ -608,6 +608,90 @@ WORKFLOW_GROUPS: list[FormGroup] = [
         )],
         default_endpoint_id="workflow-cross-reference",
     ),
+
+    # --- Multi-hop (full depth) presets ---
+
+    FormGroup(
+        id="wf-full-due-diligence",
+        name="Full Due Diligence",
+        description="Multi-hop: seed parcel → owners → portfolios → ranked history → encumbrances → risk scoring.",
+        icon="fa-project-diagram",
+        color="primary",
+        category="workflow",
+        flowchart="full-due-diligence",
+        params=[
+            _PRESET_HIDDEN("full-due-diligence"), _PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA,
+            _TIPO_CATASTO, _SEZIONE,
+            _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM,
+            EndpointParam(
+                name="max_paid_steps", label="Max Paid Steps", placeholder="3",
+                input_type="text", required=False,
+                help_text="Maximum number of paid ispezione ipotecaria invocations (default: 3)",
+            ),
+        ],
+        endpoints=[EndpointOption(
+            id="workflow-full-due-diligence", name="Full Due Diligence",
+            path="/visura/workflow", method="POST",
+            description="seed → owners → portfolios → history → encumbrances → risk",
+        )],
+        default_endpoint_id="workflow-full-due-diligence",
+    ),
+
+    FormGroup(
+        id="wf-full-patrimonio",
+        name="Full Portfolio Investigation",
+        description="Multi-hop: soggetto → drill-down → owners → portfolios → history → encumbrances → risk scoring.",
+        icon="fa-project-diagram",
+        color="info",
+        category="workflow",
+        flowchart="full-patrimonio",
+        params=[
+            _PRESET_HIDDEN("full-patrimonio"),
+            EndpointParam(name="codice_fiscale", label="Codice Fiscale",
+                          placeholder="e.g. RSSMRI85E28H501E", example="RSSMRI85E28H501E"),
+            _TIPO_CATASTO_TFE, _PROVINCIA_OPT,
+            _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM,
+            EndpointParam(
+                name="max_paid_steps", label="Max Paid Steps", placeholder="3",
+                input_type="text", required=False,
+                help_text="Maximum number of paid ispezione ipotecaria invocations (default: 3)",
+            ),
+        ],
+        endpoints=[EndpointOption(
+            id="workflow-full-patrimonio", name="Full Portfolio Investigation",
+            path="/visura/workflow", method="POST",
+            description="soggetto → drill → owners → portfolios → history → risk",
+        )],
+        default_endpoint_id="workflow-full-patrimonio",
+    ),
+
+    FormGroup(
+        id="wf-full-aziendale",
+        name="Full Corporate Audit",
+        description="Multi-hop: azienda → drill-down → owners → portfolios → history → encumbrances → risk scoring.",
+        icon="fa-project-diagram",
+        color="warning",
+        category="workflow",
+        flowchart="full-aziendale",
+        params=[
+            _PRESET_HIDDEN("full-aziendale"),
+            EndpointParam(name="identificativo", label="P.IVA / Company",
+                          placeholder="e.g. 02471840997", example="02471840997"),
+            _TIPO_CATASTO_TFE, _PROVINCIA_OPT,
+            _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM,
+            EndpointParam(
+                name="max_paid_steps", label="Max Paid Steps", placeholder="3",
+                input_type="text", required=False,
+                help_text="Maximum number of paid ispezione ipotecaria invocations (default: 3)",
+            ),
+        ],
+        endpoints=[EndpointOption(
+            id="workflow-full-aziendale", name="Full Corporate Audit",
+            path="/visura/workflow", method="POST",
+            description="azienda → drill → owners → portfolios → history → risk",
+        )],
+        default_endpoint_id="workflow-full-aziendale",
+    ),
 ]
 
 

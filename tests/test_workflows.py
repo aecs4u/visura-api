@@ -60,7 +60,10 @@ class TestWorkflowInput:
         assert wf.auto_confirm is True
 
     def test_all_presets_defined(self):
-        expected = {"due-diligence", "patrimonio", "fondiario", "aziendale", "storico", "indirizzo", "cross-reference"}
+        expected = {
+            "due-diligence", "patrimonio", "fondiario", "aziendale", "storico", "indirizzo", "cross-reference",
+            "full-due-diligence", "full-patrimonio", "full-aziendale",
+        }
         assert set(WORKFLOW_PRESETS.keys()) == expected
 
     def test_each_preset_has_steps_and_requires(self):
@@ -94,12 +97,12 @@ class TestWorkflowInput:
         assert "cross_property_intestati" in steps
 
     def test_depth_filtering(self):
-        """Verify that depth tiers are correctly assigned to steps."""
+        """Verify that paid steps are at deep or full depth."""
         from sister.models import STEP_METADATA, _DEPTH_ORDER
-        # Paid steps should be deep
         for step_name, meta in STEP_METADATA.items():
             if meta["paid"]:
-                assert meta["depth"] == "deep", f"Paid step '{step_name}' should be depth=deep"
+                assert _DEPTH_ORDER[meta["depth"]] >= _DEPTH_ORDER["deep"], \
+                    f"Paid step '{step_name}' should be depth>=deep, got {meta['depth']}"
 
     def test_depth_validation(self):
         wf = WorkflowInput(
@@ -335,8 +338,8 @@ class TestStepExecutorRegistry:
 
     def test_executor_count(self):
         from sister.workflows import _STEP_EXECUTORS
-        # 18 browser steps + 3 analytical (owner_expand, timeline_build, risk_score)
-        assert len(_STEP_EXECUTORS) >= 21
+        # 18 browser + 3 analytical + 4 multi-hop = 25
+        assert len(_STEP_EXECUTORS) >= 25
 
 
 class TestWorkflowPresetValidation:
@@ -610,6 +613,180 @@ class TestAggregateWithNewSteps:
         ]
         result = _build_aggregate(steps)
         assert len(result["properties"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-hop step executors
+# ---------------------------------------------------------------------------
+
+
+class TestPropertyRank:
+    """Test _exec_property_rank scoring."""
+
+    def test_empty_results(self):
+        import asyncio
+        from sister.workflows import _exec_property_rank
+        result = asyncio.run(_exec_property_rank(None, {}, []))
+        assert result["total"] == 0
+
+    def test_scores_same_location_higher(self):
+        import asyncio
+        from sister.workflows import _exec_property_rank
+        steps = [
+            {"step": "search", "status": "completed", "data": {
+                "immobili": [
+                    {"Foglio": "1", "Particella": "10", "Sub": "", "Provincia": "Roma", "Comune": "ROMA"},
+                    {"Foglio": "2", "Particella": "20", "Sub": "", "Provincia": "Milano", "Comune": "MILANO"},
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_property_rank(None, {"provincia": "Roma", "comune": "ROMA"}, steps))
+        ranked = result["ranked_properties"]
+        assert len(ranked) == 2
+        # Roma property should score higher (same location as seed)
+        assert ranked[0]["provincia"] == "Roma"
+        assert ranked[0]["_score"] > ranked[1]["_score"]
+
+    def test_multi_path_discovery_bonus(self):
+        import asyncio
+        from sister.workflows import _exec_property_rank
+        steps = [
+            {"step": "search", "status": "completed", "data": {
+                "immobili": [{"Foglio": "1", "Particella": "10", "Sub": "", "Provincia": "X", "Comune": "Y"}],
+            }},
+            {"step": "owner_expand", "status": "completed", "data": {
+                "discovered_properties": [{"provincia": "X", "comune": "Y", "foglio": "1", "particella": "10", "subalterno": None}],
+                "owner_entities": [], "total_owners": 0, "total_discovered": 1, "truncated": False,
+            }},
+        ]
+        result = asyncio.run(_exec_property_rank(None, {}, steps))
+        # The property found via two paths should get a bonus
+        ranked = result["ranked_properties"]
+        assert len(ranked) == 1
+        assert ranked[0]["_score"] > 10  # base is 10, multi-path adds 10
+
+    def test_above_threshold_count(self):
+        import asyncio
+        from sister.workflows import _exec_property_rank
+        steps = [
+            {"step": "search", "status": "completed", "data": {
+                "immobili": [
+                    {"Foglio": str(i), "Particella": str(i), "Sub": "", "Provincia": "X", "Comune": "Y"}
+                    for i in range(5)
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_property_rank(None, {"min_property_score": 50}, steps))
+        assert result["above_threshold"] == 0  # base score 10 < threshold 50
+
+
+class TestPortfolioDrillIntestati:
+    """Test that portfolio_drill_intestati requires property_rank output."""
+
+    def test_skips_without_rank(self):
+        import asyncio
+        from sister.workflows import _exec_portfolio_drill_intestati
+        result = asyncio.run(_exec_portfolio_drill_intestati(None, {}, []))
+        assert result["skipped"]
+
+    def test_skips_below_threshold(self):
+        import asyncio
+        from sister.workflows import _exec_portfolio_drill_intestati
+        steps = [
+            {"step": "property_rank", "status": "completed", "data": {
+                "ranked_properties": [
+                    {"provincia": "X", "comune": "Y", "foglio": "1", "particella": "1",
+                     "subalterno": None, "_score": 5, "_key": "X:Y:1:1:"},
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_portfolio_drill_intestati(None, {"min_property_score": 30}, steps))
+        assert result["skipped"]
+
+
+class TestPortfolioIpotecaria:
+    """Test paid step budget controls."""
+
+    def test_skips_without_auto_confirm(self):
+        import asyncio
+        from sister.workflows import _exec_portfolio_ipotecaria
+        steps = [
+            {"step": "property_rank", "status": "completed", "data": {
+                "ranked_properties": [{"_score": 50, "_key": "X:Y:1:1:", "provincia": "X", "comune": "Y", "foglio": "1", "particella": "1"}],
+            }},
+        ]
+        result = asyncio.run(_exec_portfolio_ipotecaria(None, {"auto_confirm": False}, steps))
+        assert result["skipped"]
+
+    def test_respects_max_paid_steps(self):
+        import asyncio
+        from sister.workflows import _exec_portfolio_ipotecaria
+        steps = [
+            {"step": "property_rank", "status": "completed", "data": {
+                "ranked_properties": [
+                    {"_score": 50, "_key": f"X:Y:{i}:{i}:", "provincia": "X", "comune": "Y", "foglio": str(i), "particella": str(i)}
+                    for i in range(10)
+                ],
+            }},
+        ]
+        # Already used 3 of 3 paid steps
+        params = {"auto_confirm": True, "max_paid_steps": 3, "_paid_step_count": 3, "min_property_score": 30}
+        result = asyncio.run(_exec_portfolio_ipotecaria(None, params, steps))
+        assert result["total"] == 0  # no budget left
+
+
+class TestMultiHopPresets:
+    """Test full-* preset definitions."""
+
+    def test_full_due_diligence_exists(self):
+        assert "full-due-diligence" in WORKFLOW_PRESETS
+
+    def test_full_patrimonio_exists(self):
+        assert "full-patrimonio" in WORKFLOW_PRESETS
+
+    def test_full_aziendale_exists(self):
+        assert "full-aziendale" in WORKFLOW_PRESETS
+
+    def test_full_presets_have_property_rank(self):
+        for name in ("full-due-diligence", "full-patrimonio", "full-aziendale"):
+            assert "property_rank" in WORKFLOW_PRESETS[name]["steps"]
+            assert "portfolio_drill_intestati" in WORKFLOW_PRESETS[name]["steps"]
+
+    def test_full_presets_end_with_risk_score(self):
+        for name in ("full-due-diligence", "full-patrimonio", "full-aziendale"):
+            steps = WORKFLOW_PRESETS[name]["steps"]
+            assert steps[-1] == "risk_score"
+
+    def test_full_presets_valid_input(self):
+        wf = WorkflowInput(
+            preset="full-due-diligence", provincia="Roma", comune="ROMA",
+            foglio="1", particella="1", depth="full",
+            max_paid_steps=5, max_owners=15,
+        )
+        assert wf.depth == "full"
+        assert wf.max_paid_steps == 5
+
+
+class TestBudgetControls:
+    """Test that budget fields are validated."""
+
+    def test_max_fanout_range(self):
+        with pytest.raises(ValidationError):
+            WorkflowInput(preset="due-diligence", provincia="X", max_fanout=0)
+        with pytest.raises(ValidationError):
+            WorkflowInput(preset="due-diligence", provincia="X", max_fanout=101)
+
+    def test_max_paid_steps_range(self):
+        wf = WorkflowInput(preset="due-diligence", provincia="X", comune="X", foglio="1", particella="1", max_paid_steps=0)
+        assert wf.max_paid_steps == 0
+
+    def test_full_depth_accepted(self):
+        wf = WorkflowInput(preset="full-due-diligence", provincia="X", comune="X", foglio="1", particella="1", depth="full")
+        assert wf.depth == "full"
+
+    def test_executor_count_with_multi_hop(self):
+        from sister.workflows import _STEP_EXECUTORS
+        assert len(_STEP_EXECUTORS) >= 25
 
 
 class TestWorkflowCLI:

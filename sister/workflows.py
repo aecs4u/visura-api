@@ -180,25 +180,64 @@ def _build_aggregate(step_results: list[dict]) -> dict:
         if count > 1:
             risk_flags.append({"type": "multiple_owners", "property_key": pk, "count": count})
 
-    # Collect timeline and risk_score outputs from analytical steps
+    # Collect timeline, risk_score, and multi-hop outputs
     timeline: list[dict] = []
     risk_scores: dict = {}
+    ranked_properties: list[dict] = []
     for step in step_results:
         if step["status"] != "completed" or not step.get("data"):
             continue
         data = step["data"]
-        if step["step"] == "timeline_build":
+        step_name = step["step"]
+
+        if step_name == "timeline_build":
             timeline = data.get("timeline", [])
-        if step["step"] == "risk_score":
+        if step_name == "risk_score":
             risk_scores = data
-            # Merge risk_score flags into aggregate risk_flags
             risk_flags.extend(data.get("risk_flags", []))
+        if step_name == "property_rank":
+            ranked_properties = data.get("ranked_properties", [])
+
         # owner_expand discovered properties
         for prop in data.get("discovered_properties", []):
             pk = f"{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
             if pk not in prop_keys_seen:
                 prop_keys_seen.add(pk)
                 properties.append(prop)
+
+        # portfolio_drill_intestati results
+        for pi in data.get("portfolio_intestati", []):
+            prop = pi.get("property", {})
+            pk = f"{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+            if pk not in prop_keys_seen:
+                prop_keys_seen.add(pk)
+                properties.append(prop)
+            for owner in pi.get("intestati", []):
+                _collect_owner(owner, f"portfolio_drill:{pk}", property_key=pk)
+
+        # portfolio_history results
+        for hr in data.get("history_results", []):
+            prop = hr.get("property", {})
+            pk = f"{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+            for sub_step in ("ispezioni", "ispezioni_cart", "originali"):
+                sub_data = hr.get(sub_step)
+                if isinstance(sub_data, dict) and sub_data.get("risultati"):
+                    for row in sub_data["risultati"]:
+                        links.append({"property_key": pk, "owner_key": None,
+                                      "source_step": f"history:{sub_step}:{pk}"})
+
+        # portfolio_ipotecaria results
+        for pr in data.get("paid_results", []):
+            if pr.get("status") == "completed" and pr.get("result"):
+                prop = pr.get("property", {})
+                pk = f"{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+                res_data = pr["result"]
+                if isinstance(res_data, dict) and res_data.get("risultati"):
+                    risk_flags.append({
+                        "type": "paid_findings", "severity": "high",
+                        "property_key": pk, "count": len(res_data["risultati"]),
+                        "cost": res_data.get("cost"),
+                    })
 
     return {
         "properties": properties,
@@ -208,6 +247,7 @@ def _build_aggregate(step_results: list[dict]) -> dict:
         "risk_flags": risk_flags,
         "timeline": timeline,
         "risk_scores": risk_scores,
+        "ranked_properties": ranked_properties,
     }
 
 
@@ -944,6 +984,282 @@ async def _exec_risk_score(_page, params: dict, step_results: list[dict]) -> dic
     }
 
 
+# ---------------------------------------------------------------------------
+# Multi-hop steps (full depth — bounded graph expansion)
+# ---------------------------------------------------------------------------
+
+
+def _collect_all_properties(step_results: list[dict]) -> list[dict]:
+    """Gather all discovered properties from all completed steps."""
+    props: list[dict] = []
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        data = s["data"]
+        for imm in data.get("immobili", []):
+            p = _normalize_property(imm)
+            if p:
+                props.append(p)
+        for drill in data.get("drill_results", []):
+            p = drill.get("property")
+            if p and p.get("provincia"):
+                props.append(p)
+        for dp in data.get("discovered_properties", []):
+            if dp.get("provincia"):
+                props.append(dp)
+        for entity in data.get("owner_entities", []):
+            pass  # entities don't carry properties inline
+        for portfolio in data.get("owner_portfolios", []):
+            for imm in portfolio.get("immobili", []):
+                p = _normalize_property(imm)
+                if p:
+                    props.append(p)
+    return _deduplicate_properties(props)
+
+
+def _collect_all_owner_cfs(step_results: list[dict]) -> set[str]:
+    """Gather all unique owner CFs from intestati/drill results."""
+    cfs: set[str] = set()
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        data = s["data"]
+        for owner in data.get("intestati", []):
+            cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+            if cf and len(cf) >= 11:
+                cfs.add(cf)
+        for drill in data.get("drill_results", []):
+            for owner in drill.get("intestati", []):
+                cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+                if cf and len(cf) >= 11:
+                    cfs.add(cf)
+        for pi in data.get("portfolio_intestati", []):
+            for owner in pi.get("intestati", []):
+                cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+                if cf and len(cf) >= 11:
+                    cfs.add(cf)
+    return cfs
+
+
+async def _exec_property_rank(_page, params: dict, step_results: list[dict]) -> dict:
+    """Score and rank discovered properties for selective enrichment.
+
+    Scoring criteria:
+    - same provincia/comune as seed: +20
+    - multiple owners found: +15
+    - missing subalterno on fabbricati: +10
+    - discovered via multiple paths: +10
+    - owner with missing CF: +5
+    - otherwise: base score 10
+    """
+    all_props = _collect_all_properties(step_results)
+    seed_prov = (params.get("provincia") or "").upper()
+    seed_com = (params.get("comune") or "").upper()
+
+    # Count how many times each property key appears (multi-path discovery)
+    discovery_counts: dict[str, int] = {}
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        data = s["data"]
+        for imm in data.get("immobili", []):
+            p = _normalize_property(imm)
+            if p:
+                k = f"{p['provincia']}:{p['comune']}:{p['foglio']}:{p['particella']}:{p.get('subalterno', '')}"
+                discovery_counts[k] = discovery_counts.get(k, 0) + 1
+        for drill in data.get("drill_results", []):
+            prop = drill.get("property", {})
+            k = f"{prop.get('provincia', '')}:{prop.get('comune', '')}:{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+            discovery_counts[k] = discovery_counts.get(k, 0) + 1
+        for dp in data.get("discovered_properties", []):
+            k = f"{dp.get('provincia', '')}:{dp.get('comune', '')}:{dp.get('foglio', '')}:{dp.get('particella', '')}:{dp.get('subalterno', '')}"
+            discovery_counts[k] = discovery_counts.get(k, 0) + 1
+
+    # Collect owner counts per property from drill results
+    prop_owner_counts: dict[str, int] = {}
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        for drill in s["data"].get("drill_results", []):
+            prop = drill.get("property", {})
+            k = f"{prop.get('provincia', '')}:{prop.get('comune', '')}:{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+            prop_owner_counts[k] = len(drill.get("intestati", []))
+
+    # Owners with missing CF
+    missing_cf_owners: set[str] = set()
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        for owner in s["data"].get("intestati", []):
+            cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip()
+            nome = (owner.get("Nominativo o denominazione") or owner.get("Nominativo") or "").strip()
+            if not cf and nome:
+                missing_cf_owners.add(nome)
+
+    ranked = []
+    for prop in all_props:
+        k = f"{prop.get('provincia', '')}:{prop.get('comune', '')}:{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+        score = 10  # base
+
+        if prop.get("provincia", "").upper() == seed_prov and prop.get("comune", "").upper() == seed_com:
+            score += 20
+        if prop_owner_counts.get(k, 0) > 1:
+            score += 15
+        tc = prop.get("tipo_catasto", "")
+        if tc == "F" and not prop.get("subalterno"):
+            score += 10
+        if discovery_counts.get(k, 0) > 1:
+            score += 10
+
+        ranked.append({**prop, "_score": score, "_key": k})
+
+    ranked.sort(key=lambda p: -p["_score"])
+    min_score = params.get("min_property_score", 30)
+
+    return {
+        "ranked_properties": ranked,
+        "total": len(ranked),
+        "above_threshold": sum(1 for p in ranked if p["_score"] >= min_score),
+        "min_score": min_score,
+    }
+
+
+async def _exec_portfolio_drill_intestati(page, params: dict, step_results: list[dict]) -> dict:
+    """Run intestati on top-ranked unseen properties from owner expansion.
+
+    Uses property_rank output to select which properties to enrich.
+    Tracks per-property persistence keys for resume.
+    """
+    # Get ranked properties from prior step
+    rank_step = next((s for s in step_results if s["step"] == "property_rank" and s["status"] == "completed"), None)
+    if not rank_step or not rank_step.get("data"):
+        return {"portfolio_intestati": [], "total": 0, "skipped": "no ranked properties"}
+
+    ranked = rank_step["data"].get("ranked_properties", [])
+    min_score = params.get("min_property_score", 30)
+    limit = params.get("max_properties_per_owner", 20)
+
+    # Filter: above threshold, not the seed property itself
+    seed_key = f"{params.get('provincia', '')}:{params.get('comune', '')}:{params.get('foglio', '')}:{params.get('particella', '')}:{params.get('subalterno', '')}"
+    candidates = [p for p in ranked if p.get("_score", 0) >= min_score and p.get("_key") != seed_key][:limit]
+
+    if not candidates:
+        return {"portfolio_intestati": [], "total": 0, "skipped": "no candidates above threshold"}
+
+    results = []
+    for prop in candidates:
+        tc = prop.get("tipo_catasto") or ("F" if prop.get("subalterno") else "T")
+        try:
+            if tc == "F" and prop.get("subalterno"):
+                res = await run_visura_immobile(
+                    page, prop["provincia"], prop["comune"], prop.get("sezione"),
+                    prop["foglio"], prop["particella"], prop["subalterno"],
+                )
+            else:
+                res = await run_visura(
+                    page, prop["provincia"], prop["comune"], prop.get("sezione"),
+                    prop["foglio"], prop["particella"], tc, extract_intestati=True,
+                )
+            intestati = res.get("intestati", []) if isinstance(res, dict) else []
+            results.append({"property": prop, "intestati": intestati, "status": "completed"})
+        except Exception as e:
+            logger.warning("Portfolio drill intestati failed for %s: %s", prop.get("_key"), e)
+            results.append({"property": prop, "intestati": [], "status": "error", "error": str(e)})
+
+    return {"portfolio_intestati": results, "total": len(results)}
+
+
+async def _exec_portfolio_history(page, params: dict, step_results: list[dict]) -> dict:
+    """Run ispezioni, ispezioni_cart, originali, and nota on top-ranked properties.
+
+    Only processes the top N properties (max_historical_properties).
+    Selectively runs each sub-step only when required inputs are present.
+    """
+    rank_step = next((s for s in step_results if s["step"] == "property_rank" and s["status"] == "completed"), None)
+    if not rank_step or not rank_step.get("data"):
+        return {"history_results": [], "total": 0, "skipped": "no ranked properties"}
+
+    ranked = rank_step["data"].get("ranked_properties", [])
+    min_score = params.get("min_property_score", 30)
+    limit = params.get("max_historical_properties", 5)
+    candidates = [p for p in ranked if p.get("_score", 0) >= min_score][:limit]
+
+    if not candidates:
+        return {"history_results": [], "total": 0, "skipped": "no candidates above threshold"}
+
+    results = []
+    for prop in candidates:
+        history: dict = {"property": prop, "ispezioni": None, "ispezioni_cart": None, "originali": None, "nota": None}
+        tc = prop.get("tipo_catasto") or "T"
+        prov, com = prop.get("provincia", ""), prop.get("comune", "")
+        fog, par = prop.get("foglio"), prop.get("particella")
+
+        if prov and com:
+            try:
+                history["ispezioni"] = await run_ispezioni(page, prov, comune=com, tipo_catasto=tc, foglio=fog, particella=par)
+            except Exception as e:
+                history["ispezioni"] = {"error": str(e)}
+
+            try:
+                history["ispezioni_cart"] = await run_ispezioni_cartacee(page, prov, comune=com, tipo_catasto=tc, foglio=fog, particella=par)
+            except Exception as e:
+                history["ispezioni_cart"] = {"error": str(e)}
+
+            try:
+                history["originali"] = await run_originali_impianto(page, prov, comune=com, tipo_catasto=tc, foglio=fog)
+            except Exception as e:
+                history["originali"] = {"error": str(e)}
+
+        history["status"] = "completed"
+        results.append(history)
+
+    return {"history_results": results, "total": len(results)}
+
+
+async def _exec_portfolio_ipotecaria(page, params: dict, step_results: list[dict]) -> dict:
+    """Run paid ispezione ipotecaria on top-risk properties.
+
+    Uses property_rank scores and respects max_paid_steps budget.
+    """
+    if not params.get("auto_confirm"):
+        return {"paid_results": [], "total": 0, "skipped": "auto_confirm not set"}
+
+    rank_step = next((s for s in step_results if s["step"] == "property_rank" and s["status"] == "completed"), None)
+    if not rank_step or not rank_step.get("data"):
+        return {"paid_results": [], "total": 0, "skipped": "no ranked properties"}
+
+    ranked = rank_step["data"].get("ranked_properties", [])
+    max_paid = params.get("max_paid_steps", 3)
+    min_score = params.get("min_property_score", 30)
+    # Only top-risk: above threshold, sorted by score desc (already sorted)
+    candidates = [p for p in ranked if p.get("_score", 0) >= min_score][:max_paid]
+
+    if not candidates:
+        return {"paid_results": [], "total": 0, "skipped": "no candidates above threshold"}
+
+    paid_count = params.get("_paid_step_count", 0)
+    results = []
+    for prop in candidates:
+        if paid_count >= max_paid:
+            break
+        try:
+            res = await run_ispezione_ipotecaria(
+                page, provincia=prop.get("provincia", ""), comune=prop.get("comune"),
+                tipo_ricerca="immobile",
+                foglio=prop.get("foglio"), particella=prop.get("particella"),
+                tipo_catasto=prop.get("tipo_catasto", "T"),
+                auto_confirm=True,
+            )
+            results.append({"property": prop, "result": res, "status": "completed"})
+            paid_count += 1
+        except Exception as e:
+            logger.warning("Portfolio ipotecaria failed for %s: %s", prop.get("_key"), e)
+            results.append({"property": prop, "result": None, "status": "error", "error": str(e)})
+
+    params["_paid_step_count"] = paid_count
+    return {"paid_results": results, "total": len(results), "paid_invocations": paid_count}
+
+
 _STEP_EXECUTORS = {
     "search": _exec_search,
     "intestati": _exec_intestati,
@@ -966,6 +1282,10 @@ _STEP_EXECUTORS = {
     "owner_expand": _exec_owner_expand,
     "timeline_build": _exec_timeline_build,
     "risk_score": _exec_risk_score,
+    "property_rank": _exec_property_rank,
+    "portfolio_drill_intestati": _exec_portfolio_drill_intestati,
+    "portfolio_history": _exec_portfolio_history,
+    "portfolio_ipotecaria": _exec_portfolio_ipotecaria,
 }
 
 
@@ -1039,6 +1359,14 @@ async def run_workflow(
         "indirizzo": wf.indirizzo,
         "auto_confirm": wf.auto_confirm,
         "max_fanout": wf.max_fanout,
+        "max_owners": wf.max_owners,
+        "max_properties_per_owner": wf.max_properties_per_owner,
+        "max_historical_properties": wf.max_historical_properties,
+        "max_paid_steps": wf.max_paid_steps,
+        "max_total_steps": wf.max_total_steps,
+        # Runtime counters (mutated during execution)
+        "_paid_step_count": 0,
+        "_total_step_count": 0,
     }
 
     # Persist workflow run
@@ -1061,6 +1389,12 @@ async def run_workflow(
         page = await service.browser_manager._get_authenticated_page()
 
         for step_name in steps_to_run:
+            # Circuit breaker: max total steps
+            if params.get("_total_step_count", 0) >= params.get("max_total_steps", 100):
+                step_results.append({"step": step_name, "status": "skipped", "data": None, "reason": "max_total_steps reached"})
+                logger.warning("Circuit breaker: max_total_steps (%d) reached, skipping '%s'", params["max_total_steps"], step_name)
+                continue
+
             sk = _step_key(step_name)
             executor = _STEP_EXECUTORS.get(step_name)
 
@@ -1087,6 +1421,7 @@ async def run_workflow(
                 data = await executor(page, params, step_results)
                 step_result = {"step": step_name, "status": "completed", "data": data}
                 step_results.append(step_result)
+                params["_total_step_count"] = params.get("_total_step_count", 0) + 1
 
                 # Persist step
                 try:
