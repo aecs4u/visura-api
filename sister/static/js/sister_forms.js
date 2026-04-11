@@ -396,24 +396,53 @@
     if (fileInput) fileInput.value = '';
   };
 
-  // --- Field validation rules per query type ---
+  // --- Field validation rules ---
+  // Validator for P.IVA / VAT number: must be exactly 11 digits
+  function validatePIVA(val) {
+    if (!val) return { valid: false, msg: 'Required — P.IVA must be 11 digits' };
+    const cleaned = val.replace(/[\s\-\.]/g, '');
+    if (/^\d{11}$/.test(cleaned)) return { valid: true, cleaned: cleaned };
+    if (/^\d+$/.test(cleaned) && cleaned.length !== 11) return { valid: false, msg: 'P.IVA must be exactly 11 digits (got ' + cleaned.length + ')' };
+    return { valid: false, msg: 'P.IVA must be 11 digits, got: "' + val + '"' };
+  }
+
+  // Validator for CF: 16-char alphanumeric
+  function validateCF(val) {
+    if (!val) return { valid: false, msg: 'Required' };
+    const cleaned = val.replace(/[\s\-]/g, '').toUpperCase();
+    if (/^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$/.test(cleaned)) return { valid: true, cleaned: cleaned };
+    if (/^\d{11}$/.test(cleaned)) return { valid: true, cleaned: cleaned }; // P.IVA also accepted as CF
+    return { valid: false, msg: 'Invalid format (expected 16-char CF e.g. RSSMRI85E28H501E or 11-digit P.IVA)' };
+  }
+
+  // Validator for identificativo: P.IVA, CF, or company name
+  function validateIdentificativo(val) {
+    if (!val) return { valid: false, msg: 'Required — enter P.IVA, CF, or company name' };
+    const cleaned = val.replace(/[\s\-\.]/g, '');
+    if (/^\d{11}$/.test(cleaned)) return { valid: true, cleaned: cleaned };
+    if (/^[A-Z0-9]{16}$/i.test(cleaned)) return { valid: true, cleaned: cleaned.toUpperCase() };
+    if (val.length >= 3) return { valid: true, cleaned: val.trim() }; // company name
+    return { valid: false, msg: 'Must be P.IVA (11 digits), CF (16 chars), or company name (3+ chars)' };
+  }
+
   const FIELD_VALIDATORS = {
-    'identificativo': function(val) {
-      if (!val) return { valid: false, msg: 'Required' };
-      // P.IVA: 11 digits, or CF: 16 alphanumeric, or company name
-      const cleaned = val.replace(/[\s\-\.]/g, '');
-      if (/^\d{11}$/.test(cleaned)) return { valid: true, cleaned: cleaned };
-      if (/^[A-Z0-9]{16}$/i.test(cleaned)) return { valid: true, cleaned: cleaned.toUpperCase() };
-      if (val.length >= 3) return { valid: true, cleaned: val.trim() }; // company name
-      return { valid: false, msg: 'Must be P.IVA (11 digits), CF (16 chars), or company name' };
-    },
-    'codice_fiscale': function(val) {
-      if (!val) return { valid: false, msg: 'Required' };
-      const cleaned = val.replace(/[\s\-]/g, '').toUpperCase();
-      if (/^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$/.test(cleaned)) return { valid: true, cleaned: cleaned };
-      if (/^\d{11}$/.test(cleaned)) return { valid: true, cleaned: cleaned }; // P.IVA also accepted
-      return { valid: false, msg: 'Invalid CF format (expected 16 chars e.g. RSSMRI85E28H501E)' };
-    },
+    'identificativo': validateIdentificativo,
+    // P.IVA aliases — all validate as strict 11-digit VAT number
+    'piva': validatePIVA,
+    'p.iva': validatePIVA,
+    'partita_iva': validatePIVA,
+    'vat': validatePIVA,
+    'vat_code': validatePIVA,
+    'p_iva': validatePIVA,
+    // CF aliases
+    'codice_fiscale': validateCF,
+    'cf': validateCF,
+    'tax_code': validateCF,
+    // Organization name — optional, just trim
+    'organization': function(val) { return { valid: true, cleaned: (val || '').trim() }; },
+    'organization_name': function(val) { return { valid: true, cleaned: (val || '').trim() }; },
+    'company': function(val) { return { valid: true, cleaned: (val || '').trim() }; },
+    'denominazione': function(val) { return { valid: true, cleaned: (val || '').trim() }; },
     'provincia': function(val) {
       if (!val) return { valid: true, cleaned: '' }; // optional in some contexts
       return { valid: true, cleaned: val.trim() };
@@ -529,16 +558,19 @@
     const batchCommand = commandSelect ? commandSelect.value : '';
 
     // Fields that are required (non-empty) based on the batch command
+    // Includes aliases so CSV columns like "piva" or "cf" are also enforced
     const REQUIRED_BY_COMMAND = {
       'search': ['provincia', 'comune', 'foglio', 'particella'],
       'intestati': ['provincia', 'comune', 'foglio', 'particella', 'tipo_catasto'],
-      'soggetto': ['codice_fiscale'],
-      'persona-giuridica': ['identificativo'],
+      'soggetto': ['codice_fiscale', 'cf', 'tax_code'],
+      'persona-giuridica': ['identificativo', 'piva', 'p.iva', 'partita_iva', 'vat', 'vat_code', 'p_iva'],
       'elenco-immobili': ['provincia', 'comune'],
       'indirizzo': ['provincia', 'comune', 'indirizzo'],
       'partita': ['provincia', 'comune', 'partita'],
     };
-    const requiredFields = new Set(REQUIRED_BY_COMMAND[batchCommand] || []);
+    const allRequired = REQUIRED_BY_COMMAND[batchCommand] || [];
+    // Only mark as required if the column actually exists in the CSV
+    const requiredFields = new Set(allRequired.filter(f => headers.includes(f)));
 
     for (let i = 1; i < lines.length; i++) {
       const cells = parseCSVLine(lines[i]).map(c => cleanCellValue(c));
