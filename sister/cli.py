@@ -767,6 +767,55 @@ def ispezioni_cartacee(
                             comune=comune, tipo_catasto=tipo_catasto, foglio=foglio, particella=particella)
 
 
+@query_app.command("elaborato-planimetrico")
+def elaborato_planimetrico(
+    provincia: str = typer.Option(..., "--provincia", "-P", help="Province name"),
+    comune: str = typer.Option(..., "--comune", "-C", help="Municipality name"),
+    foglio: Optional[str] = typer.Option(None, "--foglio", "-F", help="Sheet number"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+):
+    """Retrieve Elaborato Planimetrico (ELPL) on SISTER."""
+    client = VisuraClient()
+    if dry_run:
+        console.print(f"[bold yellow]DRY RUN[/bold yellow] POST /visura/elaborato-planimetrico  {provincia}/{comune}")
+        return
+    _generic_search_command("elaborato_planimetrico", provincia, client, wait, output,
+                            comune=comune, foglio=foglio)
+
+
+@query_app.command()
+def riepilogo(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+):
+    """View your SISTER query history (Riepilogo Visure)."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/riepilogo-visure")
+        return
+    _generic_search_command("riepilogo_visure", "", client, wait, output)
+
+
+@query_app.command("richieste-sister")
+def richieste_sister(
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache"),
+):
+    """View pending/completed requests on SISTER (Richieste)."""
+    client = VisuraClient()
+    if dry_run:
+        console.print("[bold yellow]DRY RUN[/bold yellow] POST /visura/richieste")
+        return
+    _generic_search_command("richieste", "", client, wait, output)
+
+
 # -- Workflow presets ---------------------------------------------------------
 
 _PRESETS = {
@@ -1348,6 +1397,9 @@ def queries():
         ("query fiduciali", "POST", "/visura/fiduciali", "Survey reference points"),
         ("query ispezioni", "POST", "/visura/ispezioni", "Property inspection records"),
         ("query ispezioni-cartacee", "POST", "/visura/ispezioni-cart", "Paper inspection records"),
+        ("query elaborato-planimetrico", "POST", "/visura/elaborato-planimetrico", "Planimetric document (ELPL)"),
+        ("query riepilogo", "POST", "/visura/riepilogo-visure", "SISTER query history"),
+        ("query richieste-sister", "POST", "/visura/richieste", "SISTER pending requests"),
         ("query workflow", "—", "search → intestati", "Full two-phase: immobili + intestati"),
         ("query batch", "POST", "/visura (×N)", "Batch search from CSV file"),
         ("get", "GET", "/visura/{request_id}", "Poll for a single result"),

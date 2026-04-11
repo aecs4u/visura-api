@@ -274,6 +274,93 @@ SINGLE_STEP_GROUPS: list[FormGroup] = [
         ],
         default_endpoint_id="partita",
     ),
+
+    FormGroup(
+        id="mappa",
+        name="Cadastral Map",
+        description="View cadastral map data for a foglio.",
+        icon="fa-map",
+        color="dark",
+        category="single",
+        params=[_PROVINCIA, _COMUNE, _FOGLIO, EndpointParam(
+            name="particella", label="Parcel (optional)", placeholder="e.g. 50",
+            required=False,
+        ), _SEZIONE],
+        endpoints=[
+            EndpointOption(id="mappa", name="Map View", path="/visura/mappa", method="POST",
+                           description="View cadastral map data (EM)"),
+            EndpointOption(id="export-mappa", name="Export Map", path="/visura/export-mappa", method="POST",
+                           description="Export cadastral map data (EXPM)"),
+        ],
+        default_endpoint_id="mappa",
+    ),
+
+    FormGroup(
+        id="elaborato-planimetrico",
+        name="Elaborato Planimetrico",
+        description="Retrieve planimetric document for a property.",
+        icon="fa-drafting-compass",
+        color="dark",
+        category="single",
+        params=[_PROVINCIA, _COMUNE, _FOGLIO_OPT],
+        endpoints=[
+            EndpointOption(id="elaborato-planimetrico", name="Elaborato Planimetrico",
+                           path="/visura/elaborato-planimetrico", method="POST",
+                           description="Planimetric document (ELPL)"),
+        ],
+        default_endpoint_id="elaborato-planimetrico",
+    ),
+
+    FormGroup(
+        id="originali-impianto",
+        name="Original Records",
+        description="Original registration records and survey points.",
+        icon="fa-archive",
+        color="dark",
+        category="single",
+        params=[_PROVINCIA, _COMUNE, _TIPO_CATASTO_TF, _FOGLIO_OPT],
+        endpoints=[
+            EndpointOption(id="originali", name="Original Records", path="/visura/originali", method="POST",
+                           description="Original registration records (OOII)"),
+            EndpointOption(id="fiduciali", name="Survey Points", path="/visura/fiduciali", method="POST",
+                           description="Survey reference points (FID)"),
+        ],
+        default_endpoint_id="originali",
+    ),
+
+    FormGroup(
+        id="ispezioni",
+        name="Inspections",
+        description="Property inspection records (digital and paper).",
+        icon="fa-clipboard-check",
+        color="dark",
+        category="single",
+        params=[_PROVINCIA, _COMUNE, _TIPO_CATASTO_TF, _FOGLIO_OPT, _PARTICELLA_OPT],
+        endpoints=[
+            EndpointOption(id="ispezioni", name="Digital Inspections", path="/visura/ispezioni", method="POST",
+                           description="Property inspection records (ISP)"),
+            EndpointOption(id="ispezioni-cartacee", name="Paper Inspections", path="/visura/ispezioni-cartacee", method="POST",
+                           description="Paper inspection records (ISPCART)"),
+        ],
+        default_endpoint_id="ispezioni",
+    ),
+
+    FormGroup(
+        id="riepilogo",
+        name="Query Summary",
+        description="View your SISTER query history and pending requests.",
+        icon="fa-history",
+        color="secondary",
+        category="single",
+        params=[],  # No parameters needed
+        endpoints=[
+            EndpointOption(id="riepilogo-visure", name="Query Summary", path="/visura/riepilogo-visure", method="POST",
+                           description="Your SISTER query history (Riepilogo Visure)"),
+            EndpointOption(id="richieste", name="Pending Requests", path="/visura/richieste", method="POST",
+                           description="Pending/completed SISTER requests (Richieste)"),
+        ],
+        default_endpoint_id="riepilogo-visure",
+    ),
 ]
 
 
