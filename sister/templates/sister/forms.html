@@ -143,12 +143,12 @@
                              style="min-height: 180px; cursor: pointer; transition: border-color 0.15s, background-color 0.15s;"
                              ondragover="event.preventDefault(); this.classList.add('border-primary', 'bg-light');"
                              ondragleave="this.classList.remove('border-primary', 'bg-light');"
-                             ondrop="handleCSVDrop(event, '{{ form_group.id }}', '{{ param.name }}');"
+                             ondrop="handleFileDrop(event, '{{ form_group.id }}', '{{ param.name }}');"
                              onclick="document.getElementById('file-input-{{ form_group.id }}').click();">
                             <div id="dropzone-hint-{{ form_group.id }}">
                                 <i class="fas fa-cloud-upload-alt fa-2x text-muted mb-2"></i>
-                                <p class="mb-1 fw-semibold">Drop CSV file here or click to browse</p>
-                                <p class="text-muted small mb-0">You can also paste CSV data directly</p>
+                                <p class="mb-1 fw-semibold">Drop file here or click to browse</p>
+                                <p class="text-muted small mb-0">Supports CSV, JSON, and XLSX &mdash; or paste data directly</p>
                             </div>
                             <textarea class="form-control font-monospace position-absolute top-0 start-0 w-100 h-100"
                                       id="param-{{ form_group.id }}-{{ param.name }}"
@@ -157,8 +157,8 @@
                                       style="opacity: 0; resize: none;"
                                       onfocus="showCSVTextarea('{{ form_group.id }}')"
                                       {% if param.required %}required{% endif %}>{{ param.example or '' }}</textarea>
-                            <input type="file" id="file-input-{{ form_group.id }}" accept=".csv,.txt" class="d-none"
-                                   onchange="loadCSVFile(this, '{{ form_group.id }}', '{{ param.name }}')">
+                            <input type="file" id="file-input-{{ form_group.id }}" accept=".csv,.txt,.json,.xlsx,.xls" class="d-none"
+                                   onchange="loadDataFile(this, '{{ form_group.id }}', '{{ param.name }}')">
                         </div>
                         <div id="csv-file-info-{{ form_group.id }}" class="mt-2 d-none">
                             <span class="badge bg-success me-2"><i class="fas fa-file-csv me-1"></i><span id="csv-file-name-{{ form_group.id }}"></span></span>

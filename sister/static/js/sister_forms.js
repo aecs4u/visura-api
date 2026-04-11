@@ -237,17 +237,79 @@
     }
   };
 
-  window.loadCSVFile = function(input, groupId, paramName) {
+  // Detect file type and parse accordingly
+  function parseFileToCSV(file, callback) {
+    const name = file.name.toLowerCase();
+    const ext = name.split('.').pop();
+
+    if (ext === 'xlsx' || ext === 'xls') {
+      // XLSX — use SheetJS
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          if (typeof XLSX === 'undefined') {
+            callback('Error: XLSX library not loaded. Please reload the page.', null);
+            return;
+          }
+          const wb = XLSX.read(e.target.result, { type: 'array' });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const csv = XLSX.utils.sheet_to_csv(ws);
+          callback(null, csv);
+        } catch (err) {
+          callback('Error parsing XLSX: ' + err.message, null);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+
+    } else if (ext === 'json') {
+      // JSON — convert array of objects to CSV
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          const data = JSON.parse(e.target.result);
+          const rows = Array.isArray(data) ? data : (data.data || data.results || [data]);
+          if (!rows.length || typeof rows[0] !== 'object') {
+            callback('Error: JSON must be an array of objects', null);
+            return;
+          }
+          const headers = Object.keys(rows[0]);
+          const lines = [headers.join(',')];
+          rows.forEach(row => {
+            lines.push(headers.map(h => {
+              const val = row[h];
+              if (val === null || val === undefined) return '';
+              const str = String(val);
+              return str.includes(',') ? '"' + str.replace(/"/g, '""') + '"' : str;
+            }).join(','));
+          });
+          callback(null, lines.join('\n'));
+        } catch (err) {
+          callback('Error parsing JSON: ' + err.message, null);
+        }
+      };
+      reader.readAsText(file);
+
+    } else {
+      // CSV / TXT — read as text
+      const reader = new FileReader();
+      reader.onload = function(e) { callback(null, e.target.result); };
+      reader.readAsText(file);
+    }
+  }
+
+  window.loadDataFile = function(input, groupId, paramName) {
     const file = input.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = function(e) {
-      setCSVData(groupId, paramName, e.target.result, file.name);
-    };
-    reader.readAsText(file);
+    parseFileToCSV(file, function(err, csv) {
+      if (err) {
+        alert(err);
+        return;
+      }
+      setCSVData(groupId, paramName, csv, file.name);
+    });
   };
 
-  window.handleCSVDrop = function(event, groupId, paramName) {
+  window.handleFileDrop = function(event, groupId, paramName) {
     event.preventDefault();
     const dropzone = document.getElementById('dropzone-' + groupId);
     if (dropzone) dropzone.classList.remove('border-primary', 'bg-light');
@@ -255,11 +317,13 @@
     // Check for file
     if (event.dataTransfer.files && event.dataTransfer.files.length > 0) {
       const file = event.dataTransfer.files[0];
-      const reader = new FileReader();
-      reader.onload = function(e) {
-        setCSVData(groupId, paramName, e.target.result, file.name);
-      };
-      reader.readAsText(file);
+      parseFileToCSV(file, function(err, csv) {
+        if (err) {
+          alert(err);
+          return;
+        }
+        setCSVData(groupId, paramName, csv, file.name);
+      });
       return;
     }
 
