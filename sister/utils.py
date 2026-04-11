@@ -726,32 +726,28 @@ async def run_visura_persona_giuridica(
 
     if is_fiscal_code:
         log.info("Codice fiscale/P.IVA: [cyan]%s[/cyan]", identificativo)
-        # Try CF radio first
-        cf_radio = page.locator("input[name='selDatiAna'][value='CF']")
+        # PNF form: radio name="selCfDn" value="CF_PNF", field name="cod_fisc"
+        cf_radio = page.locator("input[name='selCfDn'][value='CF_PNF']")
+        if await cf_radio.count() == 0:
+            cf_radio = page.locator("input[type='radio'][value='CF_PNF']")
         if await cf_radio.count() == 0:
             cf_radio = page.locator("input[type='radio'][value='CF']")
         if await cf_radio.count() > 0:
             await cf_radio.click()
 
-        cf_field = page.locator("input[name='cod_fisc_pnf']")
-        if await cf_field.count() == 0:
-            cf_field = page.locator("input[name='cod_fisc_pf']")
+        cf_field = page.locator("input[name='cod_fisc']")
         if await cf_field.count() == 0:
             cf_field = page.locator("input[name='codFiscale']")
         await cf_field.click()
         await cf_field.fill(identificativo.upper())
     else:
         log.info("Denominazione: [cyan]%s[/cyan]", identificativo)
-        # Select denominazione radio
-        denom_radio = page.locator("input[name='selDatiAna'][value='DA']")
-        if await denom_radio.count() == 0:
-            denom_radio = page.locator("input[type='radio']").first
+        # PNF form: radio name="selCfDn" value="denominazione" (default/checked)
+        denom_radio = page.locator("input[name='selCfDn'][value='denominazione']")
         if await denom_radio.count() > 0:
             await denom_radio.click()
 
         denom_field = page.locator("input[name='denominazione']")
-        if await denom_field.count() == 0:
-            denom_field = page.locator("input[name='ragsoc']")
         await denom_field.click()
         await denom_field.fill(identificativo.upper())
 
@@ -946,7 +942,7 @@ async def _navigate_select_province_and_click(page, page_logger, provincia, menu
     await page.wait_for_load_state("networkidle", timeout=30000)
     await page_logger.log(page, "provincia_applicata")
 
-    await page.get_by_role("link", name=menu_link_name).click()
+    await page.get_by_role("link", name=menu_link_name, exact=True).click()
     await page.wait_for_load_state("networkidle", timeout=30000)
     await page_logger.log(page, menu_link_name.lower().replace(" ", "_"))
 
