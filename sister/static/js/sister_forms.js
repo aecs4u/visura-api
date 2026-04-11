@@ -546,26 +546,6 @@
       return;
     }
 
-    function parseCSVLine(line) {
-      const result = [];
-      let current = '';
-      let inQuotes = false;
-      for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (ch === '"') {
-          if (inQuotes && line[i + 1] === '"') { current += '"'; i++; } // escaped quote
-          else { inQuotes = !inQuotes; }
-        } else if (ch === ',' && !inQuotes) {
-          result.push(current);
-          current = '';
-        } else {
-          current += ch;
-        }
-      }
-      result.push(current);
-      return result.map(s => s.trim());
-    }
-
     const headers = parseCSVLine(lines[0]).map(h => {
       // Strip quotes and normalize
       let cleaned = h.replace(/^["']+|["']+$/g, '').trim().toLowerCase();
@@ -772,6 +752,27 @@
 
   function toTitleCase(str) {
     return str.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  // RFC-compliant CSV line parser (handles quoted fields)
+  function parseCSVLine(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+        else { inQuotes = !inQuotes; }
+      } else if (ch === ',' && !inQuotes) {
+        result.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    result.push(current);
+    return result.map(s => s.trim());
   }
 
   // =========================================================================
