@@ -281,12 +281,24 @@
       if (typeof XLSX !== 'undefined') {
         doParseXLSX();
       } else {
-        // Lazy-load SheetJS
-        const script = document.createElement('script');
-        script.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
-        script.onload = doParseXLSX;
-        script.onerror = function() { callback('Error: Could not load XLSX library.', null); };
-        document.head.appendChild(script);
+        // Lazy-load SheetJS — try multiple CDNs
+        const cdns = [
+          'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+          'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js',
+          'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js',
+        ];
+        function tryLoad(idx) {
+          if (idx >= cdns.length) {
+            callback('Error: Could not load XLSX library from any CDN.', null);
+            return;
+          }
+          const script = document.createElement('script');
+          script.src = cdns[idx];
+          script.onload = doParseXLSX;
+          script.onerror = function() { tryLoad(idx + 1); };
+          document.head.appendChild(script);
+        }
+        tryLoad(0);
       }
 
     } else if (ext === 'json') {
@@ -474,7 +486,7 @@
       return;
     }
 
-    // Parse CSV
+    // Parse CSV (handles quoted fields properly)
     const lines = text.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
     if (lines.length < 2) {
       previewDiv.classList.add('d-none');
@@ -482,7 +494,31 @@
       return;
     }
 
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    function parseCSVLine(line) {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') { current += '"'; i++; } // escaped quote
+          else { inQuotes = !inQuotes; }
+        } else if (ch === ',' && !inQuotes) {
+          result.push(current);
+          current = '';
+        } else {
+          current += ch;
+        }
+      }
+      result.push(current);
+      return result.map(s => s.trim());
+    }
+
+    const headers = parseCSVLine(lines[0]).map(h => {
+      // Strip quotes and normalize
+      let cleaned = h.replace(/^["']+|["']+$/g, '').trim().toLowerCase();
+      return cleaned;
+    });
     const dataRows = [];
     let validCount = 0;
     let errorCount = 0;
@@ -505,7 +541,7 @@
     const requiredFields = new Set(REQUIRED_BY_COMMAND[batchCommand] || []);
 
     for (let i = 1; i < lines.length; i++) {
-      const cells = lines[i].split(',').map(c => cleanCellValue(c));
+      const cells = parseCSVLine(lines[i]).map(c => cleanCellValue(c));
       const rowData = {};
       const rowErrors = {};
       let allEmpty = true;
