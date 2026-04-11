@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
 
-Servizio REST per l'estrazione automatizzata di dati catastali dal portale **SISTER** dell'Agenzia delle Entrate, con CLI integrata. Utilizza [`aecs4u-auth`](https://github.com/aecs4u/aecs4u-auth) per l'autenticazione SPID/CIE via browser headless e [FastAPI](https://fastapi.tiangolo.com/) per esporre gli endpoint.
+Servizio REST + CLI + Web UI per l'estrazione automatizzata di dati catastali dal portale **SISTER** dell'Agenzia delle Entrate. Utilizza [`aecs4u-auth`](https://github.com/aecs4u/aecs4u-auth) per l'autenticazione SPID/CIE via browser headless, [`aecs4u-theme`](https://github.com/aecs4u/aecs4u-theme) per l'interfaccia web e [FastAPI](https://fastapi.tiangolo.com/) per l'API REST.
 
 > **Disclaimer legale** — Questo progetto è uno strumento indipendente e **non** è affiliato, approvato o supportato dall'Agenzia delle Entrate. L'utente è l'unico responsabile del rispetto dei termini di servizio del portale SISTER e della normativa vigente. L'uso di automazione sul portale potrebbe violare i termini d'uso del servizio.
 
@@ -20,6 +20,7 @@ Servizio REST per l'estrazione automatizzata di dati catastali dal portale **SIS
 - [Prerequisiti](#prerequisiti)
 - [Avvio rapido](#avvio-rapido)
 - [Configurazione](#configurazione)
+- [Web UI](#web-ui)
 - [CLI](#cli)
 - [Endpoint API](#endpoint-api)
   - [Health check](#health-check)
@@ -53,14 +54,14 @@ Entrambe le richieste vengono accodate ed eseguite sequenzialmente su un singolo
 
 ### Funzionalità principali
 
-- **CLI integrata** — `sister` con comandi query (search, intestati, workflow, batch), get, wait, requests, history, health
+- **Web UI** — Dashboard, query forms (8 tipi), results browser, workflow flowcharts, batch CSV/JSON/XLSX upload
+- **CLI integrata** — 16+ comandi query, workflow presets, batch, requests, history, db management
 - **Client Python** — `VisuraClient` asincrono con polling automatico e timeout configurabili
-- **Autenticazione SPID automatizzata** via provider Sielte ID (CIE Sign) con push notification
+- **Cache intelligente** — evita richieste duplicate; bypass con `--force`
+- **Database SQLModel** — tabelle strutturate (immobili, intestati) + Alembic migrations
+- **Autenticazione SPID/CIE** via [`aecs4u-auth`](https://github.com/aecs4u/aecs4u-auth) con keep-alive e recovery automatico
 - **Coda sequenziale** — le richieste vengono processate una alla volta per non sovraccaricare il portale
-- **Database SQLite** — persistenza richieste e risposte con query storico
-- **Ri-autenticazione automatica** — alla scadenza della sessione, il servizio tenta prima un recovery diretto e, solo se necessario, un nuovo login SPID
-- **Keep-alive** — la sessione viene mantenuta attiva con un light keep-alive ogni 30 secondi e un refresh profondo ogni 5 minuti
-- **Graceful shutdown** — su `SIGINT`/`SIGTERM` il servizio effettua il logout dal portale prima di chiudere il browser
+- **Graceful shutdown** — su `SIGINT`/`SIGTERM` il servizio effettua il logout dal portale
 - **Logging HTML completo** — ogni pagina visitata dal browser viene salvata su disco per debug e audit
 - **Docker-ready** — immagine pronta con tutte le dipendenze di sistema per Chromium headless
 
@@ -81,25 +82,26 @@ L'autenticazione SPID/CIE è gestita dal pacchetto [`aecs4u-auth`](https://githu
 ## Architettura
 
 ```
-Client HTTP / CLI
+Browser / CLI / API Client
      │
      ▼
 ┌──────────────────────────────────────────────────────┐
-│  FastAPI  (sister/main.py)                       │
+│  FastAPI  (sister/main.py)                           │
 │                                                      │
 │  ┌─────────────┐  ┌──────────────────────────────┐   │
-│  │ Routes      │──│ VisuraService                │   │
-│  │ (routes.py) │  │  • asyncio.Queue             │   │
-│  └─────────────┘  │  • response_store (dict)     │   │
-│                   │  • worker sequenziale        │   │
-│  ┌─────────────┐  └──────────┬───────────────────┘   │
-│  │ Models      │             │                       │
-│  │ (models.py) │  ┌──────────▼───────────────────┐   │
-│  └─────────────┘  │ BrowserManager               │   │
-│                   │  → delega a aecs4u_auth       │   │
-│  ┌─────────────┐  │  • SPID/CIE login + SISTER   │   │
-│  │ Database    │  │  • Keep-alive, recovery       │   │
-│  │ (SQLite)    │  └──────────┬───────────────────┘   │
+│  │ Web UI      │  │ VisuraService                │   │
+│  │ (web.py)    │  │  • asyncio.Queue             │   │
+│  │ aecs4u-theme│  │  • cache + response_store    │   │
+│  └─────────────┘  │  • worker sequenziale        │   │
+│                   └──────────┬───────────────────┘   │
+│  ┌─────────────┐             │                       │
+│  │ API Routes  │  ┌──────────▼───────────────────┐   │
+│  │ (routes.py) │  │ BrowserManager               │   │
+│  └─────────────┘  │  → delega a aecs4u_auth      │   │
+│                   │  • SPID/CIE login + SISTER   │   │
+│  ┌─────────────┐  │  • Keep-alive, recovery      │   │
+│  │ SQLModel DB │  └──────────┬───────────────────┘   │
+│  │ (SQLite)    │             │                       │
 │  └─────────────┘             │                       │
 └──────────────────────────────┼───────────────────────┘
                                │
@@ -114,29 +116,31 @@ Client HTTP / CLI
 ### Struttura del progetto
 
 ```
-visura-api/
-├── sister/             # Codice sorgente
-│   ├── main.py             # App FastAPI, lifespan, dependency injection
-│   ├── routes.py           # Route handler functions
-│   ├── services.py         # BrowserManager, VisuraService (coda + worker)
+sister/
+├── sister/                 # Codice sorgente (Python package)
+│   ├── main.py             # App FastAPI, lifespan, theme, auth
+│   ├── web.py              # Web UI routes + API proxy
+│   ├── routes.py           # REST API route handlers
+│   ├── services.py         # BrowserManager, VisuraService (coda + worker + cache)
 │   ├── models.py           # Pydantic input models, dataclass, eccezioni
-│   ├── database.py         # SQLite persistence layer (aiosqlite)
+│   ├── db_models.py        # SQLModel ORM table classes
+│   ├── database.py         # Async SQLAlchemy engine, sessions, cache
+│   ├── form_config.py      # Web UI form group definitions
 │   ├── utils.py            # Automazione SISTER: run_visura(), parse_table()
 │   ├── client.py           # VisuraClient — async HTTP client con polling
-│   └── cli.py              # CLI Typer: query (search, intestati, workflow, batch), get, wait, requests, history, health
-├── tests/                  # Test suite (156 test)
-│   ├── conftest.py         # Fixtures e stub dipendenze
-│   ├── test_database.py    # Test SQLite layer
-│   ├── test_client.py      # Test HTTP client
-│   ├── test_cli.py         # Test CLI commands
-│   ├── test_models.py      # Test Pydantic validators
-│   ├── test_fixtures.py    # Test endpoint fixtures
-│   └── test_main_cache_and_states.py  # Test cache, TTL, queue, worker
-├── examples/               # Esempi d'uso
-│   ├── cli_usage.sh        # Tutti i comandi CLI con spiegazioni
-│   ├── client_usage.py     # Script Python con VisuraClient
-│   ├── login_and_visura.py # Browser automation diretta
-│   └── login_and_intestati.py  # Flusso a due fasi con browser
+│   ├── cli.py              # CLI Typer: 16+ query commands, workflow, batch, db
+│   ├── templates/sister/   # Jinja2 templates (extends aecs4u-theme)
+│   │   ├── landing.html    # Landing page (pubblica)
+│   │   ├── index.html      # Dashboard
+│   │   ├── forms.html      # Query forms (8 gruppi)
+│   │   ├── results.html    # Results browser
+│   │   └── ...
+│   └── static/             # CSS, JS, icons, workflow SVG flowcharts
+├── tests/                  # Test suite (158+ test)
+├── alembic/                # Database migrations
+├── data/                   # SQLite database (sister.sqlite)
+├── examples/               # CLI + Python client examples
+├── scripts/                # Start script
 ├── docs/                   # Governance docs
 ├── Dockerfile
 ├── docker-compose.yaml
@@ -198,7 +202,7 @@ cp .env.example .env
 ./scripts/start.sh
 ```
 
-> **Nota:** `aecs4u-auth` è pubblicato su Google Artifact Registry. Per installazione locale in sviluppo, usa `pip install -e ../aecs4u-auth[browser]` oppure `uv sync` (il `pyproject.toml` include già la source locale per uv).
+> **Nota:** `aecs4u-auth` e `aecs4u-theme` sono su GitHub. Il `pyproject.toml` include le source git per uv.
 
 All'avvio il servizio:
 
@@ -206,7 +210,7 @@ All'avvio il servizio:
 2. Esegue il login SPID — **approva la notifica push** sull'app MySielteID entro 120 secondi
 3. Naviga fino alla sezione Visure catastali del portale SISTER
 4. Avvia il keep-alive e il worker della coda
-5. Inizia ad accettare richieste su porta 8000
+5. Inizia ad accettare richieste su porta 8025
 
 ---
 
@@ -261,6 +265,39 @@ RESPONSE_CLEANUP_INTERVAL_SECONDS=60 # Intervallo cleanup cache (secondi)
 | `VISURA_API_TIMEOUT` | `30` | Timeout HTTP in secondi |
 | `VISURA_POLL_INTERVAL` | `5` | Secondi tra un poll e l'altro |
 | `VISURA_POLL_TIMEOUT` | `300` | Tempo massimo di attesa (secondi) |
+
+---
+
+## Web UI
+
+SISTER include un'interfaccia web accessibile al browser, basata su [`aecs4u-theme`](https://github.com/aecs4u/aecs4u-theme).
+
+### Pagine disponibili
+
+| URL | Descrizione |
+|-----|-------------|
+| `GET /` | Landing page (pubblica, senza autenticazione) |
+| `GET /web/` | Dashboard — statistiche servizio, attività recente |
+| `GET /web/forms` | 8 form di ricerca raggruppati per tipo |
+| `GET /web/results` | Browser risultati con filtri e paginazione |
+| `GET /web/results/{id}` | Dettaglio risultato: immobili + intestati |
+| `GET /web/about` | Informazioni sul servizio |
+| `GET /web/privacy` | Privacy policy |
+
+### Form di ricerca
+
+La pagina `/web/forms` include 8 gruppi di form:
+
+1. **Property Search** — ricerca per foglio/particella + intestati
+2. **Person Search** — ricerca nazionale per codice fiscale
+3. **Company Search** — ricerca per P.IVA o denominazione
+4. **Property List** — elenco immobili per comune
+5. **Address Search** — ricerca per indirizzo
+6. **Partita Search** — ricerca per partita catastale
+7. **Workflow** — preset con flowchart SVG interattivo (due-diligence, patrimonio, fondiario, aziendale, storico)
+8. **Batch Upload** — drop zone per CSV, JSON o XLSX con anteprima e validazione tabella
+
+I form inviano le richieste tramite proxy API (`POST /web/api/*`) e effettuano il polling dei risultati automaticamente.
 
 ---
 
@@ -1037,7 +1074,7 @@ Per debug approfondito, ispeziona i file HTML in `logs/pages/` — mostrano esat
 
 ## Autore
 
-Sviluppato da [zornade](https://zornade.com).
+Sviluppato da [AECS4U Srl](https://aecs4u.com).
 
 ---
 
