@@ -73,6 +73,8 @@ L'autenticazione SPID/CIE è gestita dal pacchetto [`aecs4u-auth`](https://githu
 - Alcune città presentano strutture catastali particolari (sezioni urbane, mappe speciali) che possono causare risultati parziali.
 - Se la particella non esiste nel catasto, il portale restituisce "NESSUNA CORRISPONDENZA TROVATA" e l'API ritorna una lista vuota con il campo `error` valorizzato.
 - Gli immobili con partita "Soppressa" vengono inclusi nei risultati ma senza intestati.
+- **`query mappa`** (EM): la pagina Mappa ha un layout form diverso dagli altri — il selettore del pulsante di invio non corrisponde. Necessita ispezione HTML.
+- **`query ispezioni`** / **`query ispezioni-cartacee`** (ISP/ISPCART): "Passa a Ispezioni" apre un modulo SISTER completamente diverso che richiede un flusso di navigazione dedicato.
 
 ---
 
@@ -275,16 +277,30 @@ uv run sister --help
 ```
 sister
 ├── query                              # Submit cadastral queries
-│   ├── search                         # Fase 1 — immobili
-│   ├── intestati                      # Fase 2 — owners
-│   ├── workflow                       # Full two-phase automation
-│   └── batch                          # Batch search from CSV
+│   ├── search                         # Immobili by foglio/particella
+│   ├── intestati                      # Owners for a property
+│   ├── soggetto                       # National search by codice fiscale
+│   ├── azienda                        # Search by P.IVA or company name
+│   ├── elenco                         # List properties in a comune
+│   ├── indirizzo                      # Search by street address
+│   ├── partita                        # Search by partita catastale
+│   ├── nota                           # Search by annotation/note
+│   ├── mappa                          # Cadastral map data (*)
+│   ├── export-mappa                   # Export cadastral map (*)
+│   ├── originali                      # Original registration records
+│   ├── fiduciali                      # Survey reference points
+│   ├── ispezioni                      # Inspection records (*)
+│   ├── ispezioni-cartacee             # Paper inspection records (*)
+│   ├── workflow                       # Multi-phase with presets
+│   └── batch                          # Batch queries from CSV
 ├── get <request_id>                   # Poll a single result
 ├── wait <request_id>                  # Poll until complete
 ├── requests                           # List all requests with status
 ├── history                            # Query response history
 ├── health                             # Service health check
 └── queries                            # List available endpoints
+
+(*) = known limitations, see "Limitazioni note"
 ```
 
 ### Ricerca immobili
@@ -323,37 +339,122 @@ uv run sister query intestati \
     -t T --wait
 ```
 
-### Workflow (ricerca + intestati automatica)
+### Ricerca soggetto (codice fiscale)
 
 ```bash
-# Cerca immobili, poi recupera intestati per ogni subalterno trovato
-uv run sister query workflow -P Trieste -C TRIESTE -F 9 -p 166 -t F
+# Ricerca nazionale — tutti gli immobili di una persona
+uv run sister query soggetto --cf RSSMRI85E28H501E --wait
 
-# Limita a un subalterno specifico
-uv run sister query workflow -P Trieste -C TRIESTE -F 9 -p 166 -t F -sub 3
+# Limitata a una provincia
+uv run sister query soggetto --cf RSSMRI85E28H501E -P Roma --wait -o soggetto.json
+```
 
-# Salva tutto su file
-uv run sister query workflow -P Roma -C ROMA -F 100 -p 50 --output full.json
+### Ricerca azienda (P.IVA o denominazione)
+
+```bash
+# Per partita IVA
+uv run sister query azienda --id 02471840997 --wait
+
+# Per denominazione
+uv run sister query azienda --id "TIGULLIO IMMOBILIARE SRL" -P Torino --wait
+```
+
+### Elenco immobili
+
+```bash
+# Tutti gli immobili di un comune
+uv run sister query elenco -P Roma -C ROMA -t T --wait
+
+# Filtrato per foglio
+uv run sister query elenco -P Roma -C ROMA -F 100 --wait -o elenco.json
+```
+
+### Altri tipi di ricerca
+
+```bash
+# Per indirizzo
+uv run sister query indirizzo -P Terni -C TERNI -a "DEL RIVO" --wait
+
+# Per partita catastale
+uv run sister query partita -P Roma -C ROMA --partita 12345 --wait
+
+# Per nota/annotazione
+uv run sister query nota -P Bologna --numero 5678 --anno 2024 --wait
+
+# Originali di impianto
+uv run sister query originali -P Bologna -C BOLOGNA -F 55 --wait
+
+# Punti fiduciali
+uv run sister query fiduciali -P Roma -C ROMA -F 100 --wait
+```
+
+### Workflow con preset
+
+```bash
+# Due diligence immobiliare — search → intestati → ispezioni
+uv run sister query workflow --preset due-diligence \
+    -P Roma -C ROMA -F 100 -p 50 -o due_diligence.json
+
+# Indagine patrimoniale — tutti gli immobili di un soggetto
+uv run sister query workflow --preset patrimonio \
+    --cf RSSMRI85E28H501E -o patrimonio.json
+
+# Mappatura fondiaria — elenco → mappa → fiduciali → originali
+uv run sister query workflow --preset fondiario \
+    -P Roma -C ROMA -F 100 -o fondiario.json
+
+# Audit aziendale — tutti gli immobili di un'azienda
+uv run sister query workflow --preset aziendale \
+    --azienda 02471840997 -o audit.json
+
+# Analisi storica — search → intestati → nota → ispezioni → originali
+uv run sister query workflow --preset storico \
+    -P Trieste -C TRIESTE -F 9 -p 166 -o storico.json
+
+# Ricerca per indirizzo — indirizzo → search → intestati
+uv run sister query workflow --preset indirizzo \
+    -P Terni -C TERNI --indirizzo "DEL RIVO" -o indirizzo.json
+
+# Controllo incrociato persona/azienda
+uv run sister query workflow --preset cross-reference \
+    --cf RSSMRI85E28H501E --azienda 02471840997 -o cross.json
+
+# Workflow custom — combina flag a piacere
+uv run sister query workflow \
+    -P Roma -C ROMA -F 100 -p 50 \
+    --cf RSSMRI85E28H501E --elenco --mappa \
+    -o full_report.json
 ```
 
 ### Batch (ricerca multipla da CSV)
 
 ```bash
-# Invia tutte le righe dal file CSV
-uv run sister query batch --input parcelle.csv
-
-# Con attesa e output per riga
+# Ricerca immobili da CSV
 uv run sister query batch -I parcelle.csv --wait -O ./results/
+
+# Ricerca soggetto da CSV
+uv run sister query batch -I codici_fiscali.csv --command soggetto --wait
+
+# Comandi misti in un CSV (colonna 'command' per riga)
+uv run sister query batch -I mixed.csv --command auto --wait -o batch.json
 
 # Anteprima
 uv run sister query batch -I parcelle.csv --dry-run
 ```
 
-Formato CSV:
+Formato CSV (ricerca immobili):
 ```csv
 provincia,comune,foglio,particella,tipo_catasto
-Trieste,TRIESTE,9,166,F
 Roma,ROMA,100,50,T
+Roma,ROMA,100,50,F
+```
+
+Formato CSV (comandi misti):
+```csv
+command,provincia,comune,foglio,particella,codice_fiscale,identificativo,tipo_catasto
+search,Roma,ROMA,100,50,,,T
+soggetto,,,,,RSSMRI85E28H501E,,
+azienda,,,,,,02471840997,
 ```
 
 ### Polling manuale
