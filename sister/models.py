@@ -356,71 +356,121 @@ class IspezioneIpotecariaInput(BaseModel):
 
 
 # Step depth tiers: light < standard < deep
-# Each step specifies the minimum depth required and whether it's paid.
+# Each step declares:
+#   depth     — minimum depth required to run
+#   paid      — requires include_paid_steps + auto_confirm
+#   produces  — data keys this step adds (for 'when' clauses)
+#   when      — callable(step_results, params) → bool; if False, step is skipped
 STEP_METADATA = {
     # Core discovery (light)
-    "search":                    {"depth": "light",    "paid": False},
-    "intestati":                 {"depth": "light",    "paid": False},
-    "soggetto":                  {"depth": "light",    "paid": False},
-    "azienda":                   {"depth": "light",    "paid": False},
-    "elenco":                    {"depth": "light",    "paid": False},
-    "indirizzo_search":          {"depth": "light",    "paid": False},
+    "search":                    {"depth": "light",    "paid": False, "produces": ["immobili"]},
+    "intestati":                 {"depth": "light",    "paid": False, "produces": ["intestati"]},
+    "soggetto":                  {"depth": "light",    "paid": False, "produces": ["immobili"]},
+    "azienda":                   {"depth": "light",    "paid": False, "produces": ["immobili"]},
+    "elenco":                    {"depth": "light",    "paid": False, "produces": ["immobili"]},
+    "indirizzo_search":          {"depth": "light",    "paid": False, "produces": ["immobili"]},
     # Standard enrichment
-    "drill_intestati":           {"depth": "standard", "paid": False},
-    "mappa":                     {"depth": "standard", "paid": False},
-    "fiduciali":                 {"depth": "standard", "paid": False},
-    "originali":                 {"depth": "standard", "paid": False},
-    "ispezioni":                 {"depth": "standard", "paid": False},
-    "ispezioni_cart":            {"depth": "standard", "paid": False},
-    "elaborato_planimetrico":    {"depth": "standard", "paid": False},
-    "export_mappa":              {"depth": "standard", "paid": False},
-    "nota":                      {"depth": "standard", "paid": False},
-    "indirizzo_reverse":         {"depth": "standard", "paid": False},
-    # Deep enrichment (fan-out, paid)
-    "cross_property_intestati":  {"depth": "deep",     "paid": False},
-    "ispezione_ipotecaria":      {"depth": "deep",     "paid": True},
+    "drill_intestati":           {"depth": "standard", "paid": False, "produces": ["intestati", "drill_results"]},
+    "mappa":                     {"depth": "standard", "paid": False, "produces": ["risultati"],
+                                  "when": lambda results, params: bool(params.get("foglio"))},
+    "fiduciali":                 {"depth": "standard", "paid": False, "produces": ["risultati"],
+                                  "when": lambda results, params: bool(params.get("foglio"))},
+    "originali":                 {"depth": "standard", "paid": False, "produces": ["risultati"]},
+    "ispezioni":                 {"depth": "standard", "paid": False, "produces": ["risultati"]},
+    "ispezioni_cart":            {"depth": "standard", "paid": False, "produces": ["risultati"]},
+    "elaborato_planimetrico":    {"depth": "standard", "paid": False, "produces": ["risultati"]},
+    "export_mappa":              {"depth": "standard", "paid": False, "produces": ["risultati"],
+                                  "when": lambda results, params: bool(params.get("foglio"))},
+    "nota":                      {"depth": "standard", "paid": False, "produces": ["risultati"],
+                                  "when": lambda results, params: bool(params.get("numero_nota"))},
+    "indirizzo_reverse":         {"depth": "standard", "paid": False, "produces": ["addresses"]},
+    # Deep enrichment (fan-out)
+    "cross_property_intestati":  {"depth": "deep",     "paid": False, "produces": ["owner_portfolios"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and s.get("data", {}).get("intestati")
+                                      for s in results)},
+    # Analytical / post-processing (no browser needed)
+    "owner_expand":              {"depth": "deep",     "paid": False, "produces": ["owner_portfolios"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and s.get("data", {}).get("intestati")
+                                      for s in results)},
+    "timeline_build":            {"depth": "standard", "paid": False, "produces": ["timeline"],
+                                  "when": lambda results, params: any(
+                                      s["status"] == "completed" and s["step"] in ("nota", "ispezioni", "ispezioni_cart", "originali")
+                                      for s in results)},
+    "risk_score":                {"depth": "light",    "paid": False, "produces": ["risk_scores"]},
+    # Paid
+    "ispezione_ipotecaria":      {"depth": "deep",     "paid": True,  "produces": ["risultati"]},
 }
 
 _DEPTH_ORDER = {"light": 0, "standard": 1, "deep": 2}
 
 WORKFLOW_PRESETS = {
     "due-diligence": {
-        "description": "Real estate due diligence: search → intestati → ispezioni → elaborato planimetrico",
-        "steps": ["search", "intestati", "ispezioni", "elaborato_planimetrico",
-                  "cross_property_intestati", "ispezione_ipotecaria"],
+        "description": "Real estate due diligence: search → intestati → ispezioni → elaborato → timeline → risk scoring",
+        "steps": [
+            "search", "intestati", "ispezioni", "elaborato_planimetrico",
+            "owner_expand", "timeline_build",
+            "ispezione_ipotecaria",
+            "risk_score",
+        ],
         "requires": ["provincia", "comune", "foglio", "particella"],
     },
     "patrimonio": {
-        "description": "Asset investigation: soggetto → drill-down intestati → reverse address lookup",
-        "steps": ["soggetto", "drill_intestati", "indirizzo_reverse",
-                  "cross_property_intestati", "ispezione_ipotecaria"],
+        "description": "Asset investigation: soggetto → drill-down intestati → owner expand → address lookup → risk scoring",
+        "steps": [
+            "soggetto", "drill_intestati", "indirizzo_reverse",
+            "owner_expand",
+            "ispezione_ipotecaria",
+            "risk_score",
+        ],
         "requires": ["codice_fiscale"],
     },
     "fondiario": {
-        "description": "Land survey: elenco → mappa → export mappa → fiduciali → originali → elaborato planimetrico",
-        "steps": ["elenco", "mappa", "export_mappa", "fiduciali", "originali", "elaborato_planimetrico"],
+        "description": "Land survey: elenco → mappa → export → fiduciali → originali → elaborato → risk scoring",
+        "steps": [
+            "elenco", "mappa", "export_mappa", "fiduciali", "originali",
+            "elaborato_planimetrico",
+            "risk_score",
+        ],
         "requires": ["provincia", "comune"],
     },
     "aziendale": {
-        "description": "Corporate audit: azienda → drill-down intestati → reverse address lookup",
-        "steps": ["azienda", "drill_intestati", "indirizzo_reverse",
-                  "cross_property_intestati", "ispezione_ipotecaria"],
+        "description": "Corporate audit: azienda → drill-down intestati → owner expand → address lookup → risk scoring",
+        "steps": [
+            "azienda", "drill_intestati", "indirizzo_reverse",
+            "owner_expand",
+            "ispezione_ipotecaria",
+            "risk_score",
+        ],
         "requires": ["identificativo"],
     },
     "storico": {
-        "description": "Parcel history: search → intestati → nota → ispezioni → originali → elaborato planimetrico",
-        "steps": ["search", "intestati", "nota", "ispezioni", "ispezioni_cart", "originali",
-                  "elaborato_planimetrico", "cross_property_intestati", "ispezione_ipotecaria"],
+        "description": "Parcel history: search → intestati → nota → ispezioni → originali → elaborato → timeline → risk scoring",
+        "steps": [
+            "search", "intestati", "nota", "ispezioni", "ispezioni_cart", "originali",
+            "elaborato_planimetrico",
+            "owner_expand", "timeline_build",
+            "ispezione_ipotecaria",
+            "risk_score",
+        ],
         "requires": ["provincia", "comune", "foglio", "particella"],
     },
     "indirizzo": {
-        "description": "Address lookup: indirizzo → search → intestati",
-        "steps": ["indirizzo_search", "search", "intestati", "cross_property_intestati"],
+        "description": "Address lookup: indirizzo → search → intestati → owner expand → risk scoring",
+        "steps": [
+            "indirizzo_search", "search", "intestati",
+            "owner_expand",
+            "risk_score",
+        ],
         "requires": ["provincia", "comune", "indirizzo"],
     },
     "cross-reference": {
-        "description": "Cross-reference: soggetto + azienda → cross-property intestati comparison",
-        "steps": ["soggetto", "azienda", "cross_property_intestati"],
+        "description": "Cross-reference: soggetto + azienda → cross-property overlap → risk scoring",
+        "steps": [
+            "soggetto", "azienda", "cross_property_intestati",
+            "risk_score",
+        ],
         "requires": ["codice_fiscale", "identificativo"],
     },
 }

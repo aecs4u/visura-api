@@ -335,11 +335,8 @@ class TestStepExecutorRegistry:
 
     def test_executor_count(self):
         from sister.workflows import _STEP_EXECUTORS
-        # All executors: search, intestati, soggetto, azienda, drill_intestati,
-        # elenco, mappa, fiduciali, originali, ispezioni, ispezioni_cart,
-        # indirizzo_search, elaborato_planimetrico, export_mappa, nota,
-        # cross_property_intestati, indirizzo_reverse, ispezione_ipotecaria
-        assert len(_STEP_EXECUTORS) >= 18
+        # 18 browser steps + 3 analytical (owner_expand, timeline_build, risk_score)
+        assert len(_STEP_EXECUTORS) >= 21
 
 
 class TestWorkflowPresetValidation:
@@ -358,10 +355,261 @@ class TestWorkflowPresetValidation:
         defn = WORKFLOW_PRESETS["storico"]
         assert "ispezione_ipotecaria" in defn["steps"]
 
+    def test_risk_score_in_all_presets(self):
+        """risk_score should be the last step in every preset."""
+        for name, defn in WORKFLOW_PRESETS.items():
+            assert "risk_score" in defn["steps"], f"Preset '{name}' missing risk_score"
+
+    def test_timeline_build_in_document_presets(self):
+        for name in ("due-diligence", "storico"):
+            assert "timeline_build" in WORKFLOW_PRESETS[name]["steps"]
+
+    def test_owner_expand_in_intestati_presets(self):
+        for name in ("due-diligence", "patrimonio", "aziendale", "storico", "indirizzo"):
+            assert "owner_expand" in WORKFLOW_PRESETS[name]["steps"], f"Preset '{name}' missing owner_expand"
+
 
 # ---------------------------------------------------------------------------
 # CLI workflow command
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Analytical step executors (no browser)
+# ---------------------------------------------------------------------------
+
+
+class TestTimelineBuild:
+    """Test _exec_timeline_build post-processing step."""
+
+    def test_empty_results(self):
+        import asyncio
+        from sister.workflows import _exec_timeline_build
+        result = asyncio.run(_exec_timeline_build(None, {}, []))
+        assert result["total_events"] == 0
+        assert result["timeline"] == []
+        assert result["gaps"] == []
+
+    def test_extracts_dated_events(self):
+        import asyncio
+        from sister.workflows import _exec_timeline_build
+        steps = [
+            {"step": "nota", "status": "completed", "data": {
+                "risultati": [
+                    {"Data": "15/03/2020", "Tipo": "Compravendita", "Nota": "123"},
+                    {"Data": "20/06/2018", "Tipo": "Donazione", "Nota": "456"},
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_timeline_build(None, {}, steps))
+        assert result["total_events"] == 2
+        assert result["dated_events"] == 2
+        # Should be sorted chronologically (2018 before 2020)
+        assert result["timeline"][0]["date"] == "20/06/2018"
+        assert result["timeline"][1]["date"] == "15/03/2020"
+
+    def test_detects_gaps(self):
+        import asyncio
+        from sister.workflows import _exec_timeline_build
+        steps = [
+            {"step": "originali", "status": "completed", "data": {
+                "risultati": [
+                    {"Data": "01/01/2010", "Tipo": "Registrazione"},
+                    {"Data": "01/01/2020", "Tipo": "Aggiornamento"},
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_timeline_build(None, {}, steps))
+        assert result["total_gaps"] >= 1
+        assert result["gaps"][0]["gap_years"] == 10
+
+    def test_skips_non_completed(self):
+        import asyncio
+        from sister.workflows import _exec_timeline_build
+        steps = [
+            {"step": "nota", "status": "error", "data": None, "error": "fail"},
+        ]
+        result = asyncio.run(_exec_timeline_build(None, {}, steps))
+        assert result["total_events"] == 0
+
+
+class TestRiskScore:
+    """Test _exec_risk_score post-processing step."""
+
+    def test_empty_results(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        result = asyncio.run(_exec_risk_score(None, {}, []))
+        assert result["total_flags"] == 0
+        assert result["total_properties"] == 0
+        assert result["total_owners"] == 0
+
+    def test_flags_missing_cf(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        steps = [
+            {"step": "intestati", "status": "completed", "data": {
+                "intestati": [
+                    {"Nominativo": "Mario Rossi"},  # no CF
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_risk_score(None, {}, steps))
+        assert any(f["type"] == "missing_cf" for f in result["risk_flags"])
+
+    def test_flags_multiple_owners(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        steps = [
+            {"step": "drill_intestati", "status": "completed", "data": {
+                "drill_results": [
+                    {
+                        "property": {"foglio": "1", "particella": "10", "subalterno": ""},
+                        "intestati": [
+                            {"Codice fiscale": "AAABBB80C01H501A"},
+                            {"Codice fiscale": "CCCDDD90E02H501B"},
+                        ],
+                        "status": "completed",
+                    },
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_risk_score(None, {}, steps))
+        assert any(f["type"] == "multiple_owners" for f in result["risk_flags"])
+
+    def test_flags_ownership_mismatch(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        steps = [
+            {"step": "soggetto", "status": "completed", "data": {"immobili": []}},
+            {"step": "intestati", "status": "completed", "data": {
+                "intestati": [
+                    {"Codice fiscale": "AAABBB80C01H501A"},  # not in soggetto source
+                ],
+            }},
+        ]
+        params = {"codice_fiscale": "XXXYYYZZZ00A00A"}
+        result = asyncio.run(_exec_risk_score(None, params, steps))
+        assert any(f["type"] == "ownership_mismatch" for f in result["risk_flags"])
+
+    def test_geographic_concentration(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        steps = [
+            {"step": "search", "status": "completed", "data": {
+                "immobili": [
+                    {"Foglio": str(i), "Particella": str(i), "Sub": "", "Provincia": "Roma", "Comune": "ROMA"}
+                    for i in range(60)
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_risk_score(None, {}, steps))
+        assert any(f["type"] == "high_property_count" for f in result["risk_flags"])
+        assert len(result["geographic_concentration"]) > 0
+
+    def test_severity_counts(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        steps = [
+            {"step": "intestati", "status": "completed", "data": {
+                "intestati": [
+                    {"Nominativo": "No CF Person"},
+                ],
+            }},
+        ]
+        result = asyncio.run(_exec_risk_score(None, {}, steps))
+        assert "severity_counts" in result
+        assert result["severity_counts"]["medium"] > 0
+
+    def test_timeline_gaps_propagated(self):
+        import asyncio
+        from sister.workflows import _exec_risk_score
+        steps = [
+            {"step": "timeline_build", "status": "completed", "data": {
+                "gaps": [{"from_date": "01/01/2010", "to_date": "01/01/2020", "gap_years": 10}],
+                "timeline": [], "total_events": 0, "dated_events": 0, "undated_events": 0, "total_gaps": 1,
+            }},
+        ]
+        result = asyncio.run(_exec_risk_score(None, {}, steps))
+        assert any(f["type"] == "timeline_gap" for f in result["risk_flags"])
+
+
+class TestWhenClauses:
+    """Test that STEP_METADATA when-clauses work correctly."""
+
+    def test_mappa_skipped_without_foglio(self):
+        from sister.models import STEP_METADATA
+        meta = STEP_METADATA["mappa"]
+        assert not meta["when"]([], {"foglio": None})
+        assert meta["when"]([], {"foglio": "100"})
+
+    def test_nota_skipped_without_numero_nota(self):
+        from sister.models import STEP_METADATA
+        meta = STEP_METADATA["nota"]
+        assert not meta["when"]([], {"numero_nota": None})
+        assert meta["when"]([], {"numero_nota": "12345"})
+
+    def test_timeline_build_skipped_without_document_steps(self):
+        from sister.models import STEP_METADATA
+        meta = STEP_METADATA["timeline_build"]
+        # No completed document steps → skip
+        empty_results = [{"step": "search", "status": "completed", "data": {}}]
+        assert not meta["when"](empty_results, {})
+        # With nota → run
+        with_nota = [{"step": "nota", "status": "completed", "data": {"risultati": []}}]
+        assert meta["when"](with_nota, {})
+
+    def test_owner_expand_skipped_without_intestati(self):
+        from sister.models import STEP_METADATA
+        meta = STEP_METADATA["owner_expand"]
+        empty = [{"step": "search", "status": "completed", "data": {"immobili": []}}]
+        assert not meta["when"](empty, {})
+        with_intestati = [{"step": "intestati", "status": "completed", "data": {"intestati": [{"CF": "X"}]}}]
+        assert meta["when"](with_intestati, {})
+
+    def test_risk_score_has_no_when(self):
+        from sister.models import STEP_METADATA
+        assert "when" not in STEP_METADATA["risk_score"]
+
+
+class TestAggregateWithNewSteps:
+    """Test aggregation with timeline_build and risk_score outputs."""
+
+    def test_timeline_propagated_to_aggregate(self):
+        events = [{"source_step": "nota", "date": "01/01/2020", "details": {}}]
+        steps = [
+            {"step": "timeline_build", "status": "completed", "data": {
+                "timeline": events, "total_events": 1, "dated_events": 1, "undated_events": 0, "gaps": [], "total_gaps": 0,
+            }},
+        ]
+        result = _build_aggregate(steps)
+        assert result["timeline"] == events
+
+    def test_risk_scores_merged_to_aggregate(self):
+        flags = [{"type": "missing_cf", "severity": "medium", "owner": "Test"}]
+        steps = [
+            {"step": "risk_score", "status": "completed", "data": {
+                "risk_flags": flags, "total_flags": 1,
+                "severity_counts": {"medium": 1}, "total_properties": 0, "total_owners": 0,
+                "geographic_concentration": [],
+            }},
+        ]
+        result = _build_aggregate(steps)
+        assert any(f["type"] == "missing_cf" for f in result["risk_flags"])
+        assert result["risk_scores"]["total_flags"] == 1
+
+    def test_owner_expand_properties_in_aggregate(self):
+        steps = [
+            {"step": "owner_expand", "status": "completed", "data": {
+                "owner_entities": [{"codice_fiscale": "ABC", "status": "completed"}],
+                "discovered_properties": [
+                    {"provincia": "Roma", "comune": "ROMA", "foglio": "99", "particella": "1", "subalterno": None},
+                ],
+                "total_discovered": 1, "total_owners": 1, "truncated": False,
+            }},
+        ]
+        result = _build_aggregate(steps)
+        assert len(result["properties"]) == 1
 
 
 class TestWorkflowCLI:

@@ -180,12 +180,34 @@ def _build_aggregate(step_results: list[dict]) -> dict:
         if count > 1:
             risk_flags.append({"type": "multiple_owners", "property_key": pk, "count": count})
 
+    # Collect timeline and risk_score outputs from analytical steps
+    timeline: list[dict] = []
+    risk_scores: dict = {}
+    for step in step_results:
+        if step["status"] != "completed" or not step.get("data"):
+            continue
+        data = step["data"]
+        if step["step"] == "timeline_build":
+            timeline = data.get("timeline", [])
+        if step["step"] == "risk_score":
+            risk_scores = data
+            # Merge risk_score flags into aggregate risk_flags
+            risk_flags.extend(data.get("risk_flags", []))
+        # owner_expand discovered properties
+        for prop in data.get("discovered_properties", []):
+            pk = f"{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+            if pk not in prop_keys_seen:
+                prop_keys_seen.add(pk)
+                properties.append(prop)
+
     return {
         "properties": properties,
         "owners": owners,
         "links": links,
         "addresses": addresses,
         "risk_flags": risk_flags,
+        "timeline": timeline,
+        "risk_scores": risk_scores,
     }
 
 
@@ -621,6 +643,307 @@ async def _exec_ispezione_ipotecaria(page, params: dict, step_results: list[dict
     )
 
 
+# ---------------------------------------------------------------------------
+# Analytical steps (post-processing, no browser needed)
+# ---------------------------------------------------------------------------
+
+
+async def _exec_owner_expand(page, params: dict, step_results: list[dict]) -> dict:
+    """For each unique owner found in intestati/drill results, run soggetto or azienda
+    to discover their full property portfolio. Merges into normalized owner entities.
+
+    Unlike cross_property_intestati (which expands from one direction), this step:
+    - Collects ALL unique owner CFs from all completed intestati-producing steps
+    - Classifies each CF as person (16 chars) vs company (11 digits)
+    - Runs the appropriate search
+    - Deduplicates the merged property set
+    - Produces owner_entities with portfolio counts
+    """
+    owner_cfs: dict[str, str] = {}  # cf → "person" or "company"
+
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        data = s["data"]
+        for owner in data.get("intestati", []):
+            cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+            if cf and len(cf) >= 11 and cf not in owner_cfs:
+                owner_cfs[cf] = "company" if (len(cf) == 11 and cf.isdigit()) else "person"
+        for drill in data.get("drill_results", []):
+            for owner in drill.get("intestati", []):
+                cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+                if cf and len(cf) >= 11 and cf not in owner_cfs:
+                    owner_cfs[cf] = "company" if (len(cf) == 11 and cf.isdigit()) else "person"
+
+    if not owner_cfs:
+        return {"owner_entities": [], "total_owners": 0, "skipped": "no owner CFs found"}
+
+    limit = params.get("max_fanout", MAX_DRILL_DOWN)
+    entities = []
+    all_discovered_properties: list[dict] = []
+
+    for cf in sorted(owner_cfs)[:limit]:
+        entity_type = owner_cfs[cf]
+        try:
+            if entity_type == "company":
+                result = await run_visura_persona_giuridica(
+                    page, identificativo=cf,
+                    tipo_catasto=params.get("tipo_catasto", "E"),
+                    provincia=params.get("provincia"),
+                )
+            else:
+                result = await run_visura_soggetto(
+                    page, codice_fiscale=cf,
+                    tipo_catasto=params.get("tipo_catasto", "E"),
+                    provincia=params.get("provincia"),
+                )
+            immobili = result.get("immobili", []) if isinstance(result, dict) else []
+            props = [_normalize_property(imm) for imm in immobili]
+            props = [p for p in props if p is not None]
+            all_discovered_properties.extend(props)
+            entities.append({
+                "codice_fiscale": cf, "type": entity_type, "status": "completed",
+                "properties_count": len(props),
+            })
+        except Exception as e:
+            logger.warning("Owner expand failed for CF=%s: %s", cf, e)
+            entities.append({"codice_fiscale": cf, "type": entity_type, "status": "error", "error": str(e)})
+
+    all_discovered_properties = _deduplicate_properties(all_discovered_properties)
+
+    return {
+        "owner_entities": entities,
+        "total_owners": len(owner_cfs),
+        "discovered_properties": all_discovered_properties,
+        "total_discovered": len(all_discovered_properties),
+        "truncated": len(owner_cfs) > limit,
+    }
+
+
+async def _exec_timeline_build(_page, params: dict, step_results: list[dict]) -> dict:
+    """Build a chronological timeline from nota, ispezioni, originali, and ispezioni_cart results.
+
+    This is a post-processing step that does not use the browser. It extracts
+    date-like fields from prior step results and orders them into an event timeline.
+    """
+    import re
+
+    events: list[dict] = []
+    _date_pattern = re.compile(r'(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})')
+
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        data = s["data"]
+        step_name = s["step"]
+
+        # Extract from risultati (generic table rows)
+        for row in data.get("risultati", []):
+            event = {"source_step": step_name, "type": step_name}
+            # Try to extract a date from any field
+            date_found = None
+            for key, value in row.items():
+                if not isinstance(value, str):
+                    continue
+                match = _date_pattern.search(value)
+                if match and not date_found:
+                    date_found = match.group(1)
+                    event["date"] = date_found
+                    event["date_field"] = key
+            event["details"] = {k: v for k, v in row.items() if isinstance(v, str) and v.strip()}
+            events.append(event)
+
+        # Extract from intestati (ownership records with dates)
+        for owner in data.get("intestati", []):
+            event = {"source_step": step_name, "type": "ownership"}
+            for key, value in owner.items():
+                if not isinstance(value, str):
+                    continue
+                match = _date_pattern.search(value)
+                if match:
+                    event["date"] = match.group(1)
+                    event["date_field"] = key
+                    break
+            event["details"] = {k: v for k, v in owner.items() if isinstance(v, str) and v.strip()}
+            if event.get("date") or event.get("details"):
+                events.append(event)
+
+    # Sort by date (best effort — dates may be in various formats)
+    def _parse_date_key(e):
+        d = e.get("date", "")
+        parts = re.split(r'[/\-\.]', d)
+        if len(parts) == 3:
+            try:
+                day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+                if year < 100:
+                    year += 2000 if year < 50 else 1900
+                return (year, month, day)
+            except (ValueError, IndexError):
+                pass
+        return (9999, 0, 0)  # undated events sort last
+
+    events.sort(key=_parse_date_key)
+
+    # Detect gaps: if consecutive ownership events span > 1 year without an intermediate event
+    gaps = []
+    dated_events = [e for e in events if e.get("date")]
+    for i in range(1, len(dated_events)):
+        prev_key = _parse_date_key(dated_events[i - 1])
+        curr_key = _parse_date_key(dated_events[i])
+        if prev_key[0] < 9999 and curr_key[0] < 9999:
+            year_gap = curr_key[0] - prev_key[0]
+            if year_gap > 1:
+                gaps.append({
+                    "from_date": dated_events[i - 1].get("date"),
+                    "to_date": dated_events[i].get("date"),
+                    "gap_years": year_gap,
+                    "from_step": dated_events[i - 1].get("source_step"),
+                    "to_step": dated_events[i].get("source_step"),
+                })
+
+    return {
+        "timeline": events,
+        "total_events": len(events),
+        "dated_events": len(dated_events),
+        "undated_events": len(events) - len(dated_events),
+        "gaps": gaps,
+        "total_gaps": len(gaps),
+    }
+
+
+async def _exec_risk_score(_page, params: dict, step_results: list[dict]) -> dict:
+    """Score and flag risks from all prior step results.
+
+    This is a post-processing step that does not use the browser. It examines
+    the aggregate of all step data and produces risk flags with severity levels.
+
+    Risk categories:
+    - missing_cf: owner without codice fiscale
+    - multiple_owners: property with >1 owner
+    - ownership_mismatch: owner found in intestati but not in soggetto/azienda
+    - unresolved_address: indirizzo_search returned ambiguous results
+    - timeline_gap: gaps in ownership/act history
+    - high_fanout: unusually many properties or owners (concentration risk)
+    - missing_subalterno: fabbricati without sub-unit specified
+    - paid_findings: ispezione ipotecaria returned results
+    """
+    flags: list[dict] = []
+
+    # Collect all owners and properties from all steps
+    all_owners: dict[str, dict] = {}  # cf → owner data
+    all_properties: list[dict] = []
+    owner_to_props: dict[str, list[str]] = {}  # cf → [prop_keys]
+    prop_to_owners: dict[str, list[str]] = {}  # prop_key → [cfs]
+    soggetto_cfs: set[str] = set()
+    azienda_ids: set[str] = set()
+
+    for s in step_results:
+        if s["status"] != "completed" or not s.get("data"):
+            continue
+        data = s["data"]
+        step_name = s["step"]
+
+        # Track soggetto/azienda source CFs
+        if step_name == "soggetto" and params.get("codice_fiscale"):
+            soggetto_cfs.add(params["codice_fiscale"].upper())
+        if step_name == "azienda" and params.get("identificativo"):
+            azienda_ids.add(params["identificativo"].upper())
+
+        for owner in data.get("intestati", []):
+            cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+            nome = (owner.get("Nominativo o denominazione") or owner.get("Nominativo") or "").strip()
+            key = cf or nome
+            if key and key not in all_owners:
+                all_owners[key] = owner
+
+            if not cf and nome:
+                flags.append({"type": "missing_cf", "severity": "medium", "owner": nome, "source_step": step_name})
+
+        for imm in data.get("immobili", []):
+            prop = _normalize_property(imm)
+            if prop:
+                all_properties.append(prop)
+
+        # Drill-down
+        for drill in data.get("drill_results", []):
+            prop = drill.get("property", {})
+            pk = f"{prop.get('foglio', '')}:{prop.get('particella', '')}:{prop.get('subalterno', '')}"
+            for owner in drill.get("intestati", []):
+                cf = (owner.get("Codice fiscale") or owner.get("Codice Fiscale") or "").strip().upper()
+                if cf:
+                    owner_to_props.setdefault(cf, []).append(pk)
+                    prop_to_owners.setdefault(pk, []).append(cf)
+
+        # Owner expand
+        for entity in data.get("owner_entities", []):
+            if entity.get("status") == "error":
+                flags.append({"type": "owner_expand_failed", "severity": "low",
+                              "codice_fiscale": entity.get("codice_fiscale"), "error": entity.get("error")})
+
+        # Timeline gaps
+        for gap in data.get("gaps", []):
+            flags.append({"type": "timeline_gap", "severity": "medium",
+                          "from_date": gap.get("from_date"), "to_date": gap.get("to_date"),
+                          "gap_years": gap.get("gap_years")})
+
+        # Paid findings
+        if step_name == "ispezione_ipotecaria" and data.get("risultati"):
+            flags.append({"type": "paid_findings", "severity": "high",
+                          "count": len(data["risultati"]),
+                          "cost": data.get("cost")})
+
+    # Multiple owners per property
+    for pk, owners in prop_to_owners.items():
+        unique = set(owners)
+        if len(unique) > 1:
+            flags.append({"type": "multiple_owners", "severity": "low",
+                          "property_key": pk, "owner_count": len(unique)})
+
+    # Ownership mismatch: owners in intestati not found in soggetto/azienda source
+    if soggetto_cfs or azienda_ids:
+        source_ids = soggetto_cfs | azienda_ids
+        for key, owner in all_owners.items():
+            if key and key not in source_ids and len(key) >= 11:
+                flags.append({"type": "ownership_mismatch", "severity": "medium",
+                              "owner_key": key, "note": "Found in intestati but not in soggetto/azienda source"})
+
+    # Missing subalterno for fabbricati
+    all_properties = _deduplicate_properties(all_properties)
+    for prop in all_properties:
+        tc = prop.get("tipo_catasto", "")
+        if tc == "F" and not prop.get("subalterno"):
+            flags.append({"type": "missing_subalterno", "severity": "low",
+                          "property": f"{prop.get('comune', '')} F.{prop.get('foglio', '')} P.{prop.get('particella', '')}"})
+
+    # High fanout / concentration
+    if len(all_properties) > 50:
+        flags.append({"type": "high_property_count", "severity": "info", "count": len(all_properties)})
+    if len(all_owners) > 20:
+        flags.append({"type": "high_owner_count", "severity": "info", "count": len(all_owners)})
+
+    # Geographic clustering
+    by_comune: dict[str, int] = {}
+    for prop in all_properties:
+        loc = f"{prop.get('provincia', '')}/{prop.get('comune', '')}"
+        by_comune[loc] = by_comune.get(loc, 0) + 1
+    concentration = sorted(by_comune.items(), key=lambda x: -x[1])
+
+    # Severity summary
+    severity_counts = {"high": 0, "medium": 0, "low": 0, "info": 0}
+    for f in flags:
+        sev = f.get("severity", "info")
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+    return {
+        "risk_flags": flags,
+        "total_flags": len(flags),
+        "severity_counts": severity_counts,
+        "total_properties": len(all_properties),
+        "total_owners": len(all_owners),
+        "geographic_concentration": concentration[:10],
+    }
+
+
 _STEP_EXECUTORS = {
     "search": _exec_search,
     "intestati": _exec_intestati,
@@ -640,6 +963,9 @@ _STEP_EXECUTORS = {
     "cross_property_intestati": _exec_cross_property_intestati,
     "indirizzo_reverse": _exec_indirizzo_reverse,
     "ispezione_ipotecaria": _exec_ispezione_ipotecaria,
+    "owner_expand": _exec_owner_expand,
+    "timeline_build": _exec_timeline_build,
+    "risk_score": _exec_risk_score,
 }
 
 
@@ -742,6 +1068,14 @@ async def run_workflow(
                 step_results.append({"step": step_name, "status": "skipped", "data": None, "error": f"Unknown step: {step_name}"})
                 continue
 
+            # Evaluate 'when' clause — skip if precondition not met
+            meta = STEP_METADATA.get(step_name, {})
+            when_fn = meta.get("when")
+            if when_fn and not when_fn(step_results, params):
+                step_results.append({"step": step_name, "status": "skipped", "data": None, "reason": "precondition not met"})
+                logger.debug("Skipping step '%s': when-clause returned False", step_name)
+                continue
+
             # Resume: skip completed steps
             if sk in completed_steps:
                 cached = completed_steps[sk]
@@ -794,6 +1128,7 @@ async def run_workflow(
             "addresses": len(aggregate.get("addresses", [])),
             "risk_flags": len(aggregate.get("risk_flags", [])),
             "links": len(aggregate.get("links", [])),
+            "timeline_events": len(aggregate.get("timeline", [])),
         },
     }
 
