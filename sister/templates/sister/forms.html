@@ -363,7 +363,7 @@
                         {# Hidden fields for batch data #}
                         <textarea class="d-none" id="param-batch-csv_data" name="csv_data"></textarea>
                         <input type="file" id="file-input-batch" accept=".csv,.txt,.json,.xlsx,.xls" class="d-none"
-                               onchange="loadDataFile(this, 'batch', 'csv_data'); batchWizard.onDataLoaded();">
+                               onchange="loadDataFile(this, 'batch', 'csv_data');">
 
                         {# Step indicator #}
                         <div class="d-flex mb-3 gap-1" id="batch-steps">
@@ -381,7 +381,7 @@
                                  style="min-height: 160px; cursor: pointer;"
                                  ondragover="event.preventDefault(); this.classList.add('border-primary', 'bg-light');"
                                  ondragleave="this.classList.remove('border-primary', 'bg-light');"
-                                 ondrop="handleFileDrop(event, 'batch', 'csv_data'); batchWizard.onDataLoaded();"
+                                 ondrop="handleFileDrop(event, 'batch', 'csv_data');"
                                  onclick="document.getElementById('file-input-batch').click();">
                                 <div id="dropzone-hint-batch">
                                     <i class="fas fa-cloud-upload-alt fa-2x text-muted mb-2"></i>

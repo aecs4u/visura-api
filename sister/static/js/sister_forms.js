@@ -829,7 +829,10 @@
       console.log('[sister] batchWizard.onDataLoaded, textarea value length:', textarea ? textarea.value.length : 0);
       if (!textarea || !textarea.value.trim()) return;
 
-      const lines = textarea.value.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+      // Normalize line endings (Windows \r\n → \n)
+      const text = textarea.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+      const lines = text.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+      console.log('[sister] lines found:', lines.length, 'first:', lines[0] ? lines[0].substring(0, 80) : '(empty)');
       if (lines.length < 2) return;
 
       batchWizard._rawHeaders = parseCSVLine(lines[0]).map(h => h.replace(/^["']+|["']+$/g, '').trim());
