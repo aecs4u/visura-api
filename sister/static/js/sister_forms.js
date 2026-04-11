@@ -818,12 +818,20 @@
 
     onDataLoaded: function() {
       // Called after file drop/load — parse raw data and enable Next
-      setTimeout(function() {
+      // Retry up to 2s in case async parsing (XLSX) hasn't finished
+      var attempts = 0;
+      function tryParse() {
         const textarea = document.getElementById('param-' + GROUP_ID + '-' + PARAM_NAME);
-        if (!textarea || !textarea.value.trim()) return;
+        if (!textarea || !textarea.value.trim()) {
+          if (attempts++ < 10) { setTimeout(tryParse, 200); }
+          return;
+        }
 
         const lines = textarea.value.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
-        if (lines.length < 2) return;
+        if (lines.length < 2) {
+          if (attempts++ < 10) { setTimeout(tryParse, 200); }
+          return;
+        }
 
         batchWizard._rawHeaders = parseCSVLine(lines[0]).map(h => h.replace(/^["']+|["']+$/g, '').trim());
         batchWizard._rawRows = [];
@@ -836,9 +844,12 @@
         if (btn) btn.disabled = false;
 
         // Update file info
+        const infoDiv = document.getElementById('csv-file-info-' + GROUP_ID);
+        if (infoDiv) infoDiv.classList.remove('d-none');
         const rowCount = document.getElementById('csv-row-count-' + GROUP_ID);
         if (rowCount) rowCount.textContent = batchWizard._rawRows.length + ' data row(s), ' + batchWizard._rawHeaders.length + ' columns';
-      }, 200);
+      }
+      setTimeout(tryParse, 100);
     },
 
     goTo: function(step) {
