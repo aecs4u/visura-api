@@ -282,7 +282,7 @@ async def _richiedi_generic(
     anno_nota: Optional[str] = None,
     partita: Optional[str] = None,
 ):
-    valid_types = {"indirizzo", "partita", "nota", "mappa", "export-mappa", "originali", "fiduciali", "ispezioni", "ispezioni-cartacee"}
+    valid_types = {"indirizzo", "partita", "nota", "mappa", "export-mappa", "originali", "fiduciali", "ispezioni", "ispezioni-cartacee", "elaborato-planimetrico", "riepilogo-visure", "richieste"}
     normalized = search_type.replace("-", "_")
     if normalized.replace("_", "-") not in {t.replace("_", "-") for t in valid_types}:
         raise HTTPException(status_code=404, detail=f"Search type '{search_type}' not found")

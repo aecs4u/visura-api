@@ -37,6 +37,8 @@ from .models import (
 )
 from .utils import (
     extract_all_sezioni,
+    run_consultazione_richieste,
+    run_elaborato_planimetrico,
     run_elenco_immobili,
     run_export_mappa,
     run_ispezioni,
@@ -47,6 +49,7 @@ from .utils import (
     run_ricerca_mappa,
     run_ricerca_nota,
     run_ricerca_partita,
+    run_riepilogo_visure,
     run_visura,
     run_visura_immobile,
     run_visura_persona_giuridica,
@@ -63,6 +66,13 @@ _GENERIC_DISPATCHERS = {
     "fiduciali": run_punti_fiduciali,
     "ispezioni": run_ispezioni,
     "ispezioni_cart": run_ispezioni_cartacee,
+    "elaborato_planimetrico": run_elaborato_planimetrico,
+}
+
+# No-args dispatchers (riepilogo, richieste — don't take standard search params)
+_NOARGS_DISPATCHERS = {
+    "riepilogo_visure": run_riepilogo_visure,
+    "richieste": run_consultazione_richieste,
 }
 
 logger = logging.getLogger("sister")
@@ -329,9 +339,11 @@ class BrowserManager:
             )
 
     async def esegui_generic(self, request: GenericSisterRequest) -> VisuraResponse:
-        """Execute a generic SISTER search (IND, PART, NOTA, EM, EXPM, OOII, FID, ISP, ISPCART)."""
+        """Execute a generic SISTER search."""
         dispatcher = _GENERIC_DISPATCHERS.get(request.search_type)
-        if not dispatcher:
+        noargs_dispatcher = _NOARGS_DISPATCHERS.get(request.search_type)
+
+        if not dispatcher and not noargs_dispatcher:
             return VisuraResponse(
                 request_id=request.request_id, success=False,
                 tipo_catasto=request.tipo_catasto,
@@ -340,14 +352,17 @@ class BrowserManager:
         try:
             async with self._page_lock:
                 page = await self._get_authenticated_page()
-                kwargs = {
-                    "page": page,
-                    "provincia": request.provincia,
-                    **({"comune": request.comune} if request.comune else {}),
-                    **({"tipo_catasto": request.tipo_catasto} if request.tipo_catasto else {}),
-                    **request.params,
-                }
-                result = await dispatcher(**kwargs)
+                if noargs_dispatcher:
+                    result = await noargs_dispatcher(page)
+                else:
+                    kwargs = {
+                        "page": page,
+                        "provincia": request.provincia,
+                        **({"comune": request.comune} if request.comune else {}),
+                        **({"tipo_catasto": request.tipo_catasto} if request.tipo_catasto else {}),
+                        **request.params,
+                    }
+                    result = await dispatcher(**kwargs)
 
             return VisuraResponse(
                 request_id=request.request_id, success=True,

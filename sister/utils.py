@@ -1123,25 +1123,46 @@ async def run_ricerca_nota(
 
 
 async def run_ricerca_mappa(
-    page, provincia, comune, foglio, tipo_catasto="T", sezione=None,
+    page, provincia, comune, foglio, tipo_catasto="T", sezione=None, particella=None,
 ):
-    """View/extract cadastral map data (EM) on SISTER."""
+    """View/extract cadastral map data (EM) on SISTER.
+
+    Form: EstrattoMappaForm with comuneCat, foglio, particelle fields.
+    """
     time0 = time.time()
     page_logger = PageLogger("mappa")
     log.info("[bold]Ricerca mappa[/bold] %s/%s F.%s", provincia, comune, foglio)
 
     await _navigate_select_province_and_click(page, page_logger, provincia, "Mappa")
 
-    try:
-        await page.locator("select[name='tipoCatasto']").select_option(tipo_catasto)
-    except Exception:
-        pass
-
-    comune_value = await find_best_option_match(page, "select[name='denomComune']", comune)
+    # Mappa uses comuneCat (not denomComune)
+    comune_selector = "select[name='comuneCat']"
+    if await page.locator(comune_selector).count() == 0:
+        comune_selector = "select[name='denomComune']"
+    comune_value = await find_best_option_match(page, comune_selector, comune)
     if comune_value:
-        await page.locator("select[name='denomComune']").select_option(comune_value)
+        await page.locator(comune_selector).select_option(comune_value)
 
-    await page.locator("input[name='foglio']").fill(str(foglio))
+    # Fill foglio
+    foglio_field = page.locator("input[name='foglio']")
+    if await foglio_field.count() > 0:
+        await foglio_field.fill(str(foglio))
+
+    # Fill particelle (optional)
+    if particella:
+        part_field = page.locator("input[name='particelle']")
+        if await part_field.count() > 0:
+            await part_field.fill(str(particella))
+
+    # Sezione
+    if sezione:
+        sel = page.locator("input[name='selSezione']")
+        if await sel.count() > 0:
+            await sel.click()
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            sv = await find_best_option_match(page, "select[name='sezione']", sezione)
+            if sv:
+                await page.locator("select[name='sezione']").select_option(sv)
 
     await _fill_richiedente_motivo(page)
 
@@ -1167,16 +1188,17 @@ async def run_export_mappa(
 
     await _navigate_select_province_and_click(page, page_logger, provincia, "Export Mappa")
 
-    try:
-        await page.locator("select[name='tipoCatasto']").select_option(tipo_catasto)
-    except Exception:
-        pass
-
-    comune_value = await find_best_option_match(page, "select[name='denomComune']", comune)
+    # Export Mappa uses comuneCat
+    comune_selector = "select[name='comuneCat']"
+    if await page.locator(comune_selector).count() == 0:
+        comune_selector = "select[name='denomComune']"
+    comune_value = await find_best_option_match(page, comune_selector, comune)
     if comune_value:
-        await page.locator("select[name='denomComune']").select_option(comune_value)
+        await page.locator(comune_selector).select_option(comune_value)
 
-    await page.locator("input[name='foglio']").fill(str(foglio))
+    foglio_field = page.locator("input[name='foglio']")
+    if await foglio_field.count() > 0:
+        await foglio_field.fill(str(foglio))
 
     await _fill_richiedente_motivo(page)
 
@@ -1268,35 +1290,84 @@ async def run_punti_fiduciali(
     }
 
 
+async def _navigate_to_ispezioni(page, page_logger, provincia, cartacee=False):
+    """Navigate from Visure to the Ispezioni module.
+
+    Ispezioni is a separate SISTER module at /Ispezioni/ — clicking
+    "Passa a Ispezioni" lands on a Conferma Lettura page that must be
+    acknowledged before the search forms appear.
+    """
+    # First navigate to Visure and select province
+    await _navigate_select_province_and_click(
+        page, page_logger, provincia,
+        "Passa a Ispezioni Cartacee" if cartacee else "Passa a Ispezioni"
+    )
+
+    # Click "Conferma Lettura" to enter the Ispezioni module
+    conferma = page.get_by_role("link", name="Conferma Lettura")
+    if await conferma.count() > 0:
+        await conferma.click()
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page_logger.log(page, "ispezioni_conferma")
+        log.info("Conferma Lettura accettata")
+
+    # After Conferma, we should be in /Ispezioni/SceltaServizio
+    # Select the province again in the Ispezioni module
+    prov_select = page.locator("select[name='listacom']")
+    if await prov_select.count() > 0:
+        provincia_value = await find_best_option_match(page, "select[name='listacom']", provincia)
+        if provincia_value:
+            await prov_select.select_option(provincia_value)
+            applica = page.locator("input[type='submit'][value='Applica']")
+            if await applica.count() > 0:
+                await applica.click()
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await page_logger.log(page, "ispezioni_provincia")
+
+    # Click "Immobile" in the Ispezioni menu (default search type)
+    imm_link = page.get_by_role("link", name="Immobile")
+    if await imm_link.count() > 0:
+        await imm_link.click()
+        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page_logger.log(page, "ispezioni_immobile")
+
+
 async def run_ispezioni(
     page, provincia, comune, tipo_catasto="T", foglio=None, particella=None, tipo_ricerca="PF",
 ):
-    """Search property inspection records (ISP) on SISTER."""
+    """Search property inspection records (ISP) on SISTER.
+
+    Navigates through the /Ispezioni/ module (separate from /Visure/).
+    """
     time0 = time.time()
     page_logger = PageLogger("ispezioni")
-    log.info("[bold]Ispezioni[/bold] %s/%s tipo_ricerca=%s", provincia, comune, tipo_ricerca)
+    log.info("[bold]Ispezioni[/bold] %s/%s", provincia, comune)
 
-    await _navigate_select_province_and_click(page, page_logger, provincia, "Passa a Ispezioni")
+    await _navigate_to_ispezioni(page, page_logger, provincia, cartacee=False)
 
     try:
         await page.locator("select[name='tipoCatasto']").select_option(tipo_catasto)
     except Exception:
         pass
 
-    comune_value = await find_best_option_match(page, "select[name='denomComune']", comune)
-    if comune_value:
-        await page.locator("select[name='denomComune']").select_option(comune_value)
+    # Select comune (Ispezioni may use comuneCat or denomComune)
+    for sel in ["select[name='comuneCat']", "select[name='denomComune']"]:
+        if await page.locator(sel).count() > 0:
+            cv = await find_best_option_match(page, sel, comune)
+            if cv:
+                await page.locator(sel).select_option(cv)
+            break
 
     if foglio:
-        foglio_field = page.locator("input[name='foglio']")
-        if await foglio_field.count() > 0:
-            await foglio_field.fill(str(foglio))
+        f = page.locator("input[name='foglio']")
+        if await f.count() > 0:
+            await f.fill(str(foglio))
     if particella:
-        part_field = page.locator("input[name='particella1']")
-        if await part_field.count() == 0:
-            part_field = page.locator("input[name='particella']")
-        if await part_field.count() > 0:
-            await part_field.fill(str(particella))
+        for pn in ["input[name='particella1']", "input[name='particella']"]:
+            p = page.locator(pn)
+            if await p.count() > 0:
+                await p.fill(str(particella))
+                break
 
     await _fill_richiedente_motivo(page)
 
@@ -1320,27 +1391,30 @@ async def run_ispezioni_cartacee(
     page_logger = PageLogger("ispezioni_cartacee")
     log.info("[bold]Ispezioni cartacee[/bold] %s/%s", provincia, comune)
 
-    await _navigate_select_province_and_click(page, page_logger, provincia, "Passa a Ispezioni Cartacee")
+    await _navigate_to_ispezioni(page, page_logger, provincia, cartacee=True)
 
     try:
         await page.locator("select[name='tipoCatasto']").select_option(tipo_catasto)
     except Exception:
         pass
 
-    comune_value = await find_best_option_match(page, "select[name='denomComune']", comune)
-    if comune_value:
-        await page.locator("select[name='denomComune']").select_option(comune_value)
+    for sel in ["select[name='comuneCat']", "select[name='denomComune']"]:
+        if await page.locator(sel).count() > 0:
+            cv = await find_best_option_match(page, sel, comune)
+            if cv:
+                await page.locator(sel).select_option(cv)
+            break
 
     if foglio:
-        foglio_field = page.locator("input[name='foglio']")
-        if await foglio_field.count() > 0:
-            await foglio_field.fill(str(foglio))
+        f = page.locator("input[name='foglio']")
+        if await f.count() > 0:
+            await f.fill(str(foglio))
     if particella:
-        part_field = page.locator("input[name='particella1']")
-        if await part_field.count() == 0:
-            part_field = page.locator("input[name='particella']")
-        if await part_field.count() > 0:
-            await part_field.fill(str(particella))
+        for pn in ["input[name='particella1']", "input[name='particella']"]:
+            p = page.locator(pn)
+            if await p.count() > 0:
+                await p.fill(str(particella))
+                break
 
     await _fill_richiedente_motivo(page)
 
@@ -1353,6 +1427,104 @@ async def run_ispezioni_cartacee(
         "provincia": provincia, "comune": comune,
         "risultati": rows, "total_results": len(rows),
         **({"error": "NESSUNA CORRISPONDENZA TROVATA"} if results is None else {}),
+    }
+
+
+async def run_elaborato_planimetrico(
+    page, provincia, comune, tipo_catasto="F", foglio=None,
+):
+    """Retrieve Elaborato Planimetrico (ELPL) on SISTER.
+
+    Uses a different web app at /VisureNew/SwitchWebApp.do.
+    """
+    time0 = time.time()
+    page_logger = PageLogger("elaborato_planimetrico")
+    log.info("[bold]Elaborato Planimetrico[/bold] %s/%s", provincia, comune)
+
+    # Navigate to Visure and select province first
+    await _navigate_select_province_and_click(page, page_logger, provincia, "Elaborato Planimetrico")
+
+    # This may land on a different app (/VisureNew/)
+    await page.wait_for_load_state("networkidle", timeout=30000)
+    await page_logger.log(page, "elaborato_planimetrico_form")
+
+    # Try to fill the form fields
+    for sel in ["select[name='comuneCat']", "select[name='denomComune']"]:
+        if await page.locator(sel).count() > 0:
+            cv = await find_best_option_match(page, sel, comune)
+            if cv:
+                await page.locator(sel).select_option(cv)
+            break
+
+    if foglio:
+        f = page.locator("input[name='foglio']")
+        if await f.count() > 0:
+            await f.fill(str(foglio))
+
+    await _fill_richiedente_motivo(page)
+
+    results = await _submit_and_extract(page, page_logger, "elaborato_planimetrico")
+    elapsed = time.time() - time0
+    rows = results or []
+    log.info("[green]Elaborato planimetrico completato[/green] in %.1fs — %d risultati", elapsed, len(rows))
+
+    return {
+        "provincia": provincia, "comune": comune,
+        "risultati": rows, "total_results": len(rows),
+        **({"error": "NESSUNA CORRISPONDENZA TROVATA"} if results is None else {}),
+    }
+
+
+async def run_riepilogo_visure(page):
+    """Retrieve Riepilogo Visure (user's query history on SISTER)."""
+    time0 = time.time()
+    page_logger = PageLogger("riepilogo_visure")
+    log.info("[bold]Riepilogo Visure[/bold]")
+
+    # Navigate to SceltaServizio first to ensure session
+    await _navigate_to_scelta_servizio(page, page_logger)
+
+    # Navigate to Riepilogo
+    await page.goto("https://sister3.agenziaentrate.gov.it/Visure/RiepilogoVisure/UtentiRiepilogoVisure.do", timeout=30000)
+    await page.wait_for_load_state("networkidle", timeout=30000)
+    await page_logger.log(page, "riepilogo_visure")
+
+    # Extract the summary table
+    results = _extract_result_tables(await page.content())
+    elapsed = time.time() - time0
+    log.info("[green]Riepilogo visure completato[/green] in %.1fs — %d risultati", elapsed, len(results))
+
+    return {
+        "risultati": results, "total_results": len(results),
+    }
+
+
+async def run_consultazione_richieste(page):
+    """Retrieve pending/completed requests from SISTER's Richieste service."""
+    time0 = time.time()
+    page_logger = PageLogger("richieste")
+    log.info("[bold]Consultazione Richieste[/bold]")
+
+    # Navigate to SceltaServizio first
+    await _navigate_to_scelta_servizio(page, page_logger)
+
+    # Get the Richieste link URL from the page (it contains the convention number)
+    richieste_link = page.locator("a:has-text('Richieste')")
+    if await richieste_link.count() > 0:
+        href = await richieste_link.get_attribute("href")
+        if href:
+            if not href.startswith("http"):
+                href = "https://sister3.agenziaentrate.gov.it" + href
+            await page.goto(href, timeout=30000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await page_logger.log(page, "richieste")
+
+    results = _extract_result_tables(await page.content())
+    elapsed = time.time() - time0
+    log.info("[green]Consultazione richieste completata[/green] in %.1fs — %d risultati", elapsed, len(results))
+
+    return {
+        "risultati": results, "total_results": len(results),
     }
 
 
