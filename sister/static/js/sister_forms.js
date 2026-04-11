@@ -10,9 +10,6 @@
   const POLL_INTERVAL = 3000;  // ms
   const POLL_TIMEOUT = 120000;  // ms
 
-  // Available workflow flowcharts
-  const WORKFLOW_PRESETS = ['due-diligence', 'patrimonio', 'fondiario', 'aziendale', 'storico'];
-
   // CSV placeholder templates per query type
   const BATCH_CSV_TEMPLATES = {
     'search':              'provincia,comune,foglio,particella,tipo_catasto\nRoma,ROMA,100,50,T\nTrieste,TRIESTE,9,166,F',
@@ -47,31 +44,6 @@
     if (!currentVal || isTemplate) {
       textarea.value = '';
       textarea.placeholder = template;
-    }
-  }
-
-  // --- Workflow flowchart: show SVG when preset changes ---
-  const presetSelect = document.getElementById('param-workflow-preset');
-  if (presetSelect) {
-    presetSelect.addEventListener('change', updateWorkflowFlowchart);
-    // Load initial
-    updateWorkflowFlowchart();
-  }
-
-  function updateWorkflowFlowchart() {
-    const container = document.getElementById('workflow-svg-container');
-    if (!container || !presetSelect) return;
-    const preset = presetSelect.value;
-    if (WORKFLOW_PRESETS.includes(preset)) {
-      container.innerHTML = '<div class="text-center py-2"><i class="fas fa-spinner fa-spin"></i></div>';
-      fetch('/static/images/workflows/' + preset + '.svg')
-        .then(r => r.ok ? r.text() : '')
-        .then(svg => {
-          container.innerHTML = svg || '<p class="text-muted">Flowchart not available</p>';
-        })
-        .catch(() => { container.innerHTML = '<p class="text-muted">Flowchart not available</p>'; });
-    } else {
-      container.innerHTML = '<p class="text-muted">Select a preset to see its flowchart</p>';
     }
   }
 
