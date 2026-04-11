@@ -262,9 +262,19 @@ class VisuraClient:
         include_paid_steps: bool = False,
         depth: str = "standard",
         max_fanout: int = 20,
+        max_owners: int = 10,
+        max_properties_per_owner: int = 20,
+        max_historical_properties: int = 5,
+        max_paid_steps: int = 3,
+        max_total_steps: int = 100,
     ) -> dict:
         """Execute a multi-step workflow (POST /visura/workflow)."""
-        payload: dict[str, Any] = {"preset": preset, "depth": depth, "max_fanout": max_fanout}
+        payload: dict[str, Any] = {
+            "preset": preset, "depth": depth, "max_fanout": max_fanout,
+            "max_owners": max_owners, "max_properties_per_owner": max_properties_per_owner,
+            "max_historical_properties": max_historical_properties,
+            "max_paid_steps": max_paid_steps, "max_total_steps": max_total_steps,
+        }
         if provincia:
             payload["provincia"] = provincia
         if comune:

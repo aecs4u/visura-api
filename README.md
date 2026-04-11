@@ -54,8 +54,8 @@ Entrambe le richieste vengono accodate ed eseguite sequenzialmente su un singolo
 
 ### Funzionalità principali
 
-- **Web UI** — Dashboard, query forms (12 single-step + 7 workflow), results browser, workflow flowcharts with depth selector, batch CSV/JSON/XLSX upload
-- **CLI integrata** — 25+ comandi query (incl. ispezioni ipotecarie), 7 workflow presets, batch, requests, history, db management
+- **Web UI** — Dashboard, query forms (12 single-step + 10 workflow), results browser, workflow flowcharts with depth selector (light/standard/deep/full), batch CSV/JSON/XLSX upload
+- **CLI integrata** — 25+ comandi query (incl. ispezioni ipotecarie), 10 workflow presets (7 standard + 3 multi-hop), batch, requests, history, db management
 - **Client Python** — `VisuraClient` asincrono con polling automatico e timeout configurabili
 - **Cache intelligente** — evita richieste duplicate; bypass con `--force`
 - **Database SQLModel** — tabelle strutturate (immobili, intestati) + Alembic migrations
@@ -294,7 +294,7 @@ La pagina `/web/forms` include 8 gruppi di form:
 4. **Property List** — elenco immobili per comune
 5. **Address Search** — ricerca per indirizzo
 6. **Partita Search** — ricerca per partita catastale
-7. **Workflow** — 7 preset con flowchart SVG interattivo (due-diligence, patrimonio, fondiario, aziendale, storico, indirizzo, cross-reference) e depth selector (light/standard/deep)
+7. **Workflow** — 10 preset con flowchart SVG interattivo (7 standard + 3 multi-hop: full-due-diligence, full-patrimonio, full-aziendale) e depth selector (light/standard/deep/full)
 8. **Batch Upload** — drop zone per CSV, JSON o XLSX con anteprima e validazione tabella
 
 I form inviano le richieste tramite proxy API (`POST /web/api/*`) e effettuano il polling dei risultati automaticamente.
@@ -463,6 +463,15 @@ uv run sister query workflow --preset due-diligence \
 # Workflow con depth "light" — solo step core (veloce)
 uv run sister query workflow --preset patrimonio \
     --cf RSSMRI85E28H501E --depth light -o quick.json
+
+# Multi-hop full investigation — bounded graph expansion
+uv run sister query workflow --preset full-due-diligence \
+    -P Roma -C ROMA -F 100 -p 50 --depth full --include-paid --yes \
+    --max-paid 5 --max-owners 15 --max-history 10 -o full_investigation.json
+
+# Multi-hop corporate audit
+uv run sister query workflow --preset full-aziendale \
+    --azienda 02471840997 --depth full -o full_audit.json
 
 # Workflow custom — combina flag a piacere
 uv run sister query workflow \

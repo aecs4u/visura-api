@@ -1061,8 +1061,13 @@ def workflow(
     with_originali: bool = typer.Option(False, "--originali", help="Fetch original registration records"),
     with_nota: bool = typer.Option(False, "--with-nota", help="Fetch annotation/note data"),
     with_ispezioni_cart: bool = typer.Option(False, "--ispezioni-cart", help="Fetch paper inspection records"),
-    depth: str = typer.Option("standard", "--depth", "-d", help="Workflow depth: light, standard, deep"),
-    max_fanout: int = typer.Option(20, "--max-fanout", help="Max properties/owners to fan out to"),
+    depth: str = typer.Option("standard", "--depth", "-d", help="Workflow depth: light, standard, deep, full"),
+    max_fanout: int = typer.Option(20, "--max-fanout", help="Max properties/owners to fan out to per step"),
+    max_owners: int = typer.Option(10, "--max-owners", help="Max owners to expand in owner_expand"),
+    max_properties_per_owner: int = typer.Option(20, "--max-properties-per-owner", help="Max properties per owner in portfolio drill"),
+    max_historical_properties: int = typer.Option(5, "--max-history", help="Max properties to run history bundle on"),
+    max_paid_steps: int = typer.Option(3, "--max-paid", help="Max paid step invocations (ispezione ipotecaria)"),
+    max_total_steps: int = typer.Option(100, "--max-steps", help="Overall circuit breaker for total step executions"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-confirm paid service costs"),
     include_paid: bool = typer.Option(False, "--include-paid", help="Include paid steps (e.g. ispezione ipotecaria)"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
@@ -1077,19 +1082,23 @@ def workflow(
 
     \b
     Available presets:
-      due-diligence   search → intestati → ispezioni → elaborato
-      patrimonio      soggetto → drill intestati → address lookup
-      fondiario       elenco → mappa → export → fiduciali → originali → elaborato
-      aziendale       azienda → drill intestati → address lookup
-      storico         search → intestati → nota → ispezioni → originali → elaborato
-      indirizzo       indirizzo → search → intestati
-      cross-reference soggetto + azienda → owner cross-reference
+      due-diligence        search → intestati → ispezioni → elaborato → risk
+      patrimonio           soggetto → drill → address → risk
+      fondiario            elenco → mappa → export → fiduciali → originali → elaborato → risk
+      aziendale            azienda → drill → address → risk
+      storico              search → intestati → nota → ispezioni → originali → elaborato → risk
+      indirizzo            indirizzo → search → intestati → risk
+      cross-reference      soggetto + azienda → cross-property → risk
+      full-due-diligence   multi-hop: seed → owners → portfolios → history → encumbrances → risk
+      full-patrimonio      multi-hop: soggetto → drill → owners → portfolios → history → risk
+      full-aziendale       multi-hop: azienda → drill → owners → portfolios → history → risk
 
     \b
     Depth modes:
       light     Only core discovery steps (fast, free)
       standard  Adds per-property enrichment (default)
       deep      Adds owner expansion, paid inspections (requires --include-paid --yes)
+      full      Multi-hop graph expansion with budgets (requires --include-paid --yes for paid steps)
 
     \b
     Examples:
@@ -1097,6 +1106,7 @@ def workflow(
       uv run sister query workflow --preset patrimonio --cf RSSMRA85M01H501Z
       uv run sister query workflow --preset fondiario -P Roma -C ROMA -F 100
       uv run sister query workflow --preset due-diligence -P Roma -C ROMA -F 1 -p 1 --depth deep --include-paid --yes
+      uv run sister query workflow --preset full-due-diligence -P Roma -C ROMA -F 1 -p 1 --depth full --include-paid --yes --max-paid 5
       uv run sister query workflow -P Trieste -C TRIESTE -F 9 -p 166 --elenco --mappa
     """
     # -- Server-side preset execution ------------------------------------------
@@ -1113,7 +1123,8 @@ def workflow(
             console.print(f"[bold yellow]DRY RUN[/bold yellow] — POST /visura/workflow (preset={preset}, depth={depth})")
             console.print(f"  {p['description']}")
             console.print(f"  Steps: {' → '.join(p['steps'])}")
-            console.print(f"  Depth: [cyan]{depth}[/cyan]  Max fanout: [cyan]{max_fanout}[/cyan]")
+            console.print(f"  Depth: [cyan]{depth}[/cyan]  Fanout: [cyan]{max_fanout}[/cyan]  Owners: [cyan]{max_owners}[/cyan]")
+            console.print(f"  Props/owner: [cyan]{max_properties_per_owner}[/cyan]  History: [cyan]{max_historical_properties}[/cyan]  Paid: [cyan]{max_paid_steps}[/cyan]  Max steps: [cyan]{max_total_steps}[/cyan]")
             if include_paid:
                 console.print(f"  [yellow]Paid steps enabled (auto_confirm={yes})[/yellow]")
             return
@@ -1132,6 +1143,9 @@ def workflow(
                     codice_fiscale=codice_fiscale, identificativo=azienda_id,
                     indirizzo=indirizzo_str,
                     depth=depth, max_fanout=max_fanout,
+                    max_owners=max_owners, max_properties_per_owner=max_properties_per_owner,
+                    max_historical_properties=max_historical_properties,
+                    max_paid_steps=max_paid_steps, max_total_steps=max_total_steps,
                     auto_confirm=yes, include_paid_steps=include_paid,
                 )
             )

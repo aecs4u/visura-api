@@ -443,8 +443,13 @@ _PRESET_HIDDEN = lambda preset_name: EndpointParam(
 _WORKFLOW_DEPTH = EndpointParam(
     name="depth", label="Depth", placeholder="Select depth",
     input_type="select", required=False,
-    options=[("light", "Light — core steps only"), ("standard", "Standard — with enrichment"), ("deep", "Deep — owner expansion + paid")],
-    help_text="Controls which steps run. Deep adds owner expansion and paid inspections.",
+    options=[
+        ("light", "Light — core steps only"),
+        ("standard", "Standard — with enrichment"),
+        ("deep", "Deep — owner expansion + paid"),
+        ("full", "Full — multi-hop graph expansion"),
+    ],
+    help_text="Controls which steps run. Full adds portfolio drill-down, history bundles, and paid encumbrance checks.",
 )
 
 _WORKFLOW_PAID = EndpointParam(
