@@ -44,18 +44,75 @@
                        data-path="{{ form_group.endpoints[0].path }}">
                 {% endif %}
 
-                {# Workflow: show flowchart for selected preset #}
                 {% if form_group.id == 'workflow' %}
-                <div id="workflow-flowchart" class="mb-4">
-                    <div class="card bg-light">
-                        <div class="card-body text-center">
-                            <p class="text-muted mb-2"><i class="fas fa-project-diagram me-1"></i>Select a preset to see its flowchart</p>
-                            <div id="workflow-svg-container" style="max-width: 500px; margin: 0 auto;"></div>
+                {# Workflow: two-column layout — LHS preset+flowchart, RHS params #}
+                <div class="row g-4">
+                    <div class="col-md-5">
+                        {# Preset selector #}
+                        {% set preset_param = form_group.params[0] %}
+                        <label for="param-{{ form_group.id }}-{{ preset_param.name }}" class="form-label">
+                            {{ preset_param.label }}
+                            {% if preset_param.required %}<span class="text-danger">*</span>{% endif %}
+                        </label>
+                        <select class="form-select mb-3"
+                                id="param-{{ form_group.id }}-{{ preset_param.name }}"
+                                name="{{ preset_param.name }}"
+                                {% if preset_param.required %}required{% endif %}>
+                            {% for value, label in preset_param.options %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        {% if preset_param.help_text %}
+                        <div class="form-text mb-3">{{ preset_param.help_text }}</div>
+                        {% endif %}
+
+                        {# Flowchart below preset #}
+                        <div id="workflow-flowchart">
+                            <div class="card bg-light border-0">
+                                <div class="card-body text-center py-3">
+                                    <div id="workflow-svg-container"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-7">
+                        {# Remaining params (skip first which is the preset) #}
+                        <div class="row g-3">
+                            {% for param in form_group.params[1:] %}
+                            <div class="col-md-6">
+                                <label for="param-{{ form_group.id }}-{{ param.name }}" class="form-label">
+                                    {{ param.label }}
+                                    {% if param.required %}<span class="text-danger">*</span>{% endif %}
+                                </label>
+                                {% if param.input_type == 'select' %}
+                                <select class="form-select"
+                                        id="param-{{ form_group.id }}-{{ param.name }}"
+                                        name="{{ param.name }}"
+                                        {% if param.required %}required{% endif %}>
+                                    {% for value, label in param.options %}
+                                    <option value="{{ value }}">{{ label }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
+                                <input type="{{ param.input_type }}" class="form-control"
+                                       id="param-{{ form_group.id }}-{{ param.name }}"
+                                       name="{{ param.name }}"
+                                       placeholder="{{ param.placeholder }}"
+                                       {% if param.example %}value="{{ param.example }}"{% endif %}
+                                       {% if param.required %}required{% endif %}>
+                                {% endif %}
+                                {% if param.help_text %}
+                                <div class="form-text">{{ param.help_text }}</div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
                         </div>
                     </div>
                 </div>
-                {% endif %}
 
+                {% else %}
+                {# Standard layout for all other form groups #}
                 <div class="row g-3">
                     {% for param in form_group.params %}
                     <div class="{% if param.input_type == 'textarea' %}col-12{% else %}col-md-6{% endif %}">
@@ -79,7 +136,6 @@
                                   placeholder="{{ param.placeholder }}"
                                   rows="6"
                                   {% if param.required %}required{% endif %}>{{ param.example or '' }}</textarea>
-                        {# Batch: add file upload option below textarea #}
                         {% if param.name == 'csv_data' %}
                         <div class="mt-2">
                             <label class="btn btn-outline-secondary btn-sm">
@@ -104,6 +160,7 @@
                     </div>
                     {% endfor %}
                 </div>
+                {% endif %}
 
                 <div class="d-flex gap-2 mt-4">
                     <button type="submit" class="btn btn-primary">
