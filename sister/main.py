@@ -149,52 +149,58 @@ app = FastAPI(title="Servizio Visure Catastali", lifespan=lifespan)
 @app.post("/visura")
 async def _richiedi_visura(
     request: VisuraInput,
+    force: bool = False,
     service: VisuraService = Depends(get_visura_service),
     _: None = Depends(require_api_key),
 ):
-    return await richiedi_visura(request, service)
+    return await richiedi_visura(request, service, force=force)
 
 
 @app.post("/visura/intestati")
 async def _richiedi_intestati_immobile(
     request: VisuraIntestatiInput,
+    force: bool = False,
     service: VisuraService = Depends(get_visura_service),
     _: None = Depends(require_api_key),
 ):
-    return await richiedi_intestati_immobile(request, service)
+    return await richiedi_intestati_immobile(request, service, force=force)
 
 
 @app.post("/visura/soggetto")
 async def _richiedi_visura_soggetto(
     request: VisuraSoggettoInput,
+    force: bool = False,
     service: VisuraService = Depends(get_visura_service),
     _: None = Depends(require_api_key),
 ):
-    return await richiedi_visura_soggetto(request, service)
+    return await richiedi_visura_soggetto(request, service, force=force)
 
 
 @app.post("/visura/persona-giuridica")
 async def _richiedi_visura_persona_giuridica(
     request: VisuraPersonaGiuridicaInput,
+    force: bool = False,
     service: VisuraService = Depends(get_visura_service),
     _: None = Depends(require_api_key),
 ):
-    return await richiedi_visura_persona_giuridica(request, service)
+    return await richiedi_visura_persona_giuridica(request, service, force=force)
 
 
 @app.post("/visura/elenco-immobili")
 async def _richiedi_elenco_immobili(
     request: ElencoImmobiliInput,
+    force: bool = False,
     service: VisuraService = Depends(get_visura_service),
     _: None = Depends(require_api_key),
 ):
-    return await richiedi_elenco_immobili(request, service)
+    return await richiedi_elenco_immobili(request, service, force=force)
 
 
 @app.post("/visura/{search_type}")
 async def _richiedi_generic(
     search_type: str,
     provincia: str,
+    force: bool = False,
     service: VisuraService = Depends(get_visura_service),
     _: None = Depends(require_api_key),
     comune: Optional[str] = None,
@@ -232,6 +238,7 @@ async def _richiedi_generic(
         comune=comune,
         tipo_catasto=tipo_catasto,
         params=params,
+        force=force,
     )
 
 

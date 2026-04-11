@@ -90,6 +90,15 @@ class VisuraResponse:
             self.timestamp = datetime.now()
 
 
+@dataclass
+class SubmitResult:
+    """Result of submitting a request — either cached or queued."""
+
+    request_id: str
+    cached: bool = False
+    response: Optional[VisuraResponse] = None
+
+
 # ---------------------------------------------------------------------------
 # Pydantic input models (API request bodies)
 # ---------------------------------------------------------------------------

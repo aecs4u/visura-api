@@ -41,6 +41,13 @@ query_app = typer.Typer(
 )
 app.add_typer(query_app, name="query")
 
+db_app = typer.Typer(
+    name="db",
+    help="Database management (init, migrate, status)",
+    no_args_is_help=True,
+)
+app.add_typer(db_app, name="db")
+
 console = Console()
 
 
@@ -144,6 +151,7 @@ def search(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for results instead of returning immediately"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview request without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Submit an immobili search on SISTER (POST /visura).
 
@@ -237,6 +245,7 @@ def intestati(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result instead of returning immediately"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview request without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Submit an owners (intestati) lookup on SISTER (POST /visura/intestati).
 
@@ -323,6 +332,7 @@ def soggetto(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result instead of returning immediately"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview request without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """National search by codice fiscale on SISTER (POST /visura/soggetto).
 
@@ -393,6 +403,7 @@ def azienda(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview request without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Search by legal entity (P.IVA or company name) on SISTER (POST /visura/persona-giuridica).
 
@@ -463,6 +474,7 @@ def elenco(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview request without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """List all properties in a comune (POST /visura/elenco-immobili).
 
@@ -582,6 +594,7 @@ def indirizzo(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Search by street address (IND) on SISTER."""
     client = VisuraClient()
@@ -601,6 +614,7 @@ def partita(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Search by partita catastale number (PART) on SISTER."""
     client = VisuraClient()
@@ -620,6 +634,7 @@ def nota(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Search by annotation/note reference (NOTA) on SISTER."""
     client = VisuraClient()
@@ -639,6 +654,7 @@ def mappa(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """View cadastral map data (EM) on SISTER."""
     client = VisuraClient()
@@ -658,6 +674,7 @@ def export_mappa(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Export cadastral map data (EXPM) on SISTER."""
     client = VisuraClient()
@@ -677,6 +694,7 @@ def originali(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Retrieve original registration records (OOII) on SISTER."""
     client = VisuraClient()
@@ -696,6 +714,7 @@ def fiduciali(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Retrieve survey reference points (FID) on SISTER."""
     client = VisuraClient()
@@ -716,6 +735,7 @@ def ispezioni(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Search property inspection records (ISP) on SISTER."""
     client = VisuraClient()
@@ -736,6 +756,7 @@ def ispezioni_cartacee(
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for result"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview only"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Search paper inspection records (ISPCART) on SISTER."""
     client = VisuraClient()
@@ -837,6 +858,7 @@ def workflow(
     with_ispezioni_cart: bool = typer.Option(False, "--ispezioni-cart", help="Fetch paper inspection records"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path (.json)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview steps without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Multi-phase workflow with optional preset.
 
@@ -1139,6 +1161,7 @@ def batch(
     output_dir: Optional[str] = typer.Option(None, "--output-dir", "-O", help="Directory — writes one JSON per row"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Single output file (all results merged)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview rows without executing"),
+    force: bool = typer.Option(False, "--force", help="Bypass cache, always submit new request"),
 ):
     """Submit multiple queries from a CSV file.
 
@@ -1627,6 +1650,49 @@ def health():
 
     console.print(table)
     console.print(f"[dim]Service URL: {client.base_url}[/dim]")
+
+
+# =============================================================================
+# db subcommands
+# =============================================================================
+
+
+@db_app.command("init")
+def db_init():
+    """Initialize database and run all migrations."""
+    import os
+    from alembic.config import Config
+    from alembic import command
+
+    ini_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
+    cfg = Config(ini_path)
+    command.upgrade(cfg, "head")
+    console.print("[green]Database initialized and migrations applied.[/green]")
+
+
+@db_app.command("migrate")
+def db_migrate():
+    """Run pending Alembic migrations."""
+    import os
+    from alembic.config import Config
+    from alembic import command
+
+    ini_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
+    cfg = Config(ini_path)
+    command.upgrade(cfg, "head")
+    console.print("[green]Migrations applied.[/green]")
+
+
+@db_app.command("status")
+def db_status():
+    """Show current database migration revision."""
+    import os
+    from alembic.config import Config
+    from alembic import command
+
+    ini_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "alembic.ini")
+    cfg = Config(ini_path)
+    command.current(cfg, verbose=True)
 
 
 # -- entry point --------------------------------------------------------------

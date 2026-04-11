@@ -20,10 +20,16 @@ import sister.database as database
 @pytest.fixture(autouse=True)
 async def _fresh_db(tmp_path, monkeypatch):
     """Point the database module at a fresh temp file for each test."""
-    db_path = str(tmp_path / "test_visura.sqlite")
+    db_path = str(tmp_path / "test_sister.sqlite")
     monkeypatch.setattr(database, "DB_PATH", db_path)
+    # Reset the cached engine so it picks up the new path
+    database._engine = None
     await database.init_db()
     yield
+    # Clean up engine after test
+    if database._engine:
+        await database._engine.dispose()
+        database._engine = None
 
 
 # ---------------------------------------------------------------------------
@@ -33,17 +39,17 @@ async def _fresh_db(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_init_db_creates_tables():
-    db = await database.get_db()
-    try:
+    import aiosqlite
+    async with aiosqlite.connect(database.DB_PATH) as db:
         cursor = await db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         )
         tables = [row[0] for row in await cursor.fetchall()]
-    finally:
-        await db.close()
 
     assert "visura_requests" in tables
     assert "visura_responses" in tables
+    assert "immobili" in tables
+    assert "intestati" in tables
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +69,9 @@ async def test_save_request_persists_row():
         particella="166",
     )
 
-    db = await database.get_db()
+    import aiosqlite
+    db = await aiosqlite.connect(database.DB_PATH)
+    db.row_factory = aiosqlite.Row
     try:
         cursor = await db.execute(
             "SELECT * FROM visura_requests WHERE request_id = ?", ("req_T_abc",)
@@ -91,7 +99,9 @@ async def test_save_request_with_optional_fields():
         subalterno="3",
     )
 
-    db = await database.get_db()
+    import aiosqlite
+    db = await aiosqlite.connect(database.DB_PATH)
+    db.row_factory = aiosqlite.Row
     try:
         cursor = await db.execute(
             "SELECT sezione, subalterno FROM visura_requests WHERE request_id = ?",
@@ -121,7 +131,9 @@ async def test_save_requests_batch_persists_all():
     ]
     await database.save_requests_batch(rows)
 
-    db = await database.get_db()
+    import aiosqlite
+    db = await aiosqlite.connect(database.DB_PATH)
+    db.row_factory = aiosqlite.Row
     try:
         cursor = await db.execute("SELECT COUNT(*) FROM visura_requests")
         count = (await cursor.fetchone())[0]
@@ -135,7 +147,9 @@ async def test_save_requests_batch_persists_all():
 async def test_save_requests_batch_empty_is_noop():
     await database.save_requests_batch([])
 
-    db = await database.get_db()
+    import aiosqlite
+    db = await aiosqlite.connect(database.DB_PATH)
+    db.row_factory = aiosqlite.Row
     try:
         cursor = await db.execute("SELECT COUNT(*) FROM visura_requests")
         count = (await cursor.fetchone())[0]

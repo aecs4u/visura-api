@@ -1,73 +1,127 @@
-"""SQLite database layer for sister.
+"""SQLite database layer for sister (SQLModel + async SQLAlchemy).
 
-Provides persistent storage for visura requests and responses,
-replacing the in-memory dict cache.
+Provides persistent storage for visura requests, responses, and structured
+result tables (immobili, intestati). Includes cache lookup for deduplication.
 """
 
+from __future__ import annotations
+
+import hashlib
 import json
 import logging
 import os
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Any, Optional
 
-import aiosqlite
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlmodel import SQLModel, select
+
+from sqlalchemy import MetaData
+
+from .db_models import (
+    IMMOBILE_FIELD_MAP,
+    INTESTATO_FIELD_MAP,
+    ImmobileDB,
+    IntestatoDB,
+    VisuraRequestDB,
+    VisuraResponseDB,
+)
+
+# Collect only sister's tables — avoid creating tables from other packages
+# that share the global SQLModel.metadata
+_SISTER_TABLES = [
+    VisuraRequestDB.__table__,
+    VisuraResponseDB.__table__,
+    ImmobileDB.__table__,
+    IntestatoDB.__table__,
+]
 
 logger = logging.getLogger("sister")
 
 DB_PATH = os.getenv("SISTER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "sister.sqlite"))
 
+# ---------------------------------------------------------------------------
+# Engine and session
+# ---------------------------------------------------------------------------
 
-async def get_db() -> aiosqlite.Connection:
-    """Open a connection to the SQLite database."""
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA foreign_keys=ON")
-    return db
+_engine = None
+
+
+def _get_engine():
+    global _engine
+    if _engine is None:
+        os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+        url = f"sqlite+aiosqlite:///{DB_PATH}"
+        _engine = create_async_engine(url, echo=False)
+    return _engine
+
+
+def _get_session_factory():
+    return sessionmaker(_get_engine(), class_=AsyncSession, expire_on_commit=False)
 
 
 async def init_db() -> None:
-    """Create tables if they don't exist."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    db = await get_db()
-    try:
-        await db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS visura_requests (
-                request_id   TEXT PRIMARY KEY,
-                request_type TEXT NOT NULL,
-                tipo_catasto TEXT NOT NULL,
-                provincia    TEXT NOT NULL,
-                comune       TEXT NOT NULL,
-                foglio       TEXT NOT NULL,
-                particella   TEXT NOT NULL,
-                sezione      TEXT,
-                subalterno   TEXT,
-                created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', 'localtime'))
-            );
-
-            CREATE TABLE IF NOT EXISTS visura_responses (
-                request_id   TEXT PRIMARY KEY REFERENCES visura_requests(request_id),
-                success      INTEGER NOT NULL CHECK(success IN (0, 1)),
-                tipo_catasto TEXT NOT NULL,
-                data         TEXT,
-                error        TEXT,
-                created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', 'localtime'))
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_requests_created_at ON visura_requests(created_at);
-            CREATE INDEX IF NOT EXISTS idx_responses_created_at ON visura_responses(created_at);
-            CREATE INDEX IF NOT EXISTS idx_requests_lookup
-                ON visura_requests(provincia, comune, foglio, particella, tipo_catasto);
-            """
-        )
-        await db.commit()
-        logger.info(f"Database inizializzato: {DB_PATH}")
-    finally:
-        await db.close()
+    """Create sister tables if they don't exist."""
+    engine = _get_engine()
+    async with engine.begin() as conn:
+        # Only create sister's tables, not all SQLModel-registered tables
+        # (avoids conflicts with opendata models in shared venvs)
+        def _create_sister_tables(sync_conn):
+            for table in _SISTER_TABLES:
+                table.create(sync_conn, checkfirst=True)
+        await conn.run_sync(_create_sister_tables)
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.execute(text("PRAGMA foreign_keys=ON"))
+    logger.info("Database inizializzato: %s", DB_PATH)
 
 
 # ---------------------------------------------------------------------------
-# Request operations
+# Cache helpers
+# ---------------------------------------------------------------------------
+
+
+def compute_cache_key(request_type: str, **params) -> str:
+    """Deterministic cache key from search parameters."""
+    # Filter out None values and sort for determinism
+    filtered = {k: v for k, v in params.items() if v is not None}
+    canonical = json.dumps({"type": request_type, **filtered}, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def find_cached_response(cache_key: str, ttl_seconds: int) -> Optional[dict]:
+    """Find a successful, non-expired response matching the cache key."""
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        cutoff = datetime.now() - timedelta(seconds=ttl_seconds)
+        stmt = (
+            select(VisuraResponseDB)
+            .join(VisuraRequestDB)
+            .where(
+                VisuraRequestDB.cache_key == cache_key,
+                VisuraResponseDB.success == True,  # noqa: E712
+                VisuraResponseDB.created_at >= cutoff,
+            )
+            .order_by(VisuraResponseDB.created_at.desc())
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return {
+            "request_id": row.request_id,
+            "success": row.success,
+            "tipo_catasto": row.tipo_catasto,
+            "data": row.data,
+            "error": row.error,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Request operations (same signatures as before)
 # ---------------------------------------------------------------------------
 
 
@@ -81,61 +135,90 @@ async def save_request(
     particella: str,
     sezione: Optional[str] = None,
     subalterno: Optional[str] = None,
+    cache_key: Optional[str] = None,
 ) -> None:
-    """Persist a new visura/intestati request."""
-    db = await get_db()
-    try:
-        await db.execute(
-            """
-            INSERT INTO visura_requests
-                (request_id, request_type, tipo_catasto, provincia, comune, foglio, particella, sezione, subalterno)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (request_id, request_type, tipo_catasto, provincia, comune, foglio, particella, sezione, subalterno),
+    """Persist a new request."""
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        row = VisuraRequestDB(
+            request_id=request_id,
+            request_type=request_type,
+            tipo_catasto=tipo_catasto,
+            provincia=provincia,
+            comune=comune,
+            foglio=foglio,
+            particella=particella,
+            sezione=sezione,
+            subalterno=subalterno,
+            cache_key=cache_key,
         )
-        await db.commit()
-    finally:
-        await db.close()
+        session.add(row)
+        await session.commit()
 
 
 async def save_requests_batch(requests: list[dict]) -> None:
-    """Persist multiple visura/intestati requests atomically."""
+    """Persist multiple requests atomically."""
     if not requests:
         return
-
-    rows = [
-        (
-            request["request_id"],
-            request["request_type"],
-            request["tipo_catasto"],
-            request["provincia"],
-            request["comune"],
-            request["foglio"],
-            request["particella"],
-            request.get("sezione"),
-            request.get("subalterno"),
-        )
-        for request in requests
-    ]
-
-    db = await get_db()
-    try:
-        await db.executemany(
-            """
-            INSERT INTO visura_requests
-                (request_id, request_type, tipo_catasto, provincia, comune, foglio, particella, sezione, subalterno)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        await db.commit()
-    finally:
-        await db.close()
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        for req in requests:
+            row = VisuraRequestDB(
+                request_id=req["request_id"],
+                request_type=req["request_type"],
+                tipo_catasto=req["tipo_catasto"],
+                provincia=req["provincia"],
+                comune=req["comune"],
+                foglio=req["foglio"],
+                particella=req["particella"],
+                sezione=req.get("sezione"),
+                subalterno=req.get("subalterno"),
+                cache_key=req.get("cache_key"),
+            )
+            session.add(row)
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------
 # Response operations
 # ---------------------------------------------------------------------------
+
+
+def _parse_immobili(response_id: str, tipo_catasto: str, data: Optional[dict]) -> list[ImmobileDB]:
+    """Parse immobili from response JSON into structured rows."""
+    if not data or not isinstance(data, dict):
+        return []
+    rows = []
+    for item in data.get("immobili", []):
+        if not isinstance(item, dict):
+            continue
+        kwargs: dict[str, Any] = {"response_id": response_id, "tipo_catasto": tipo_catasto}
+        for html_key, db_col in IMMOBILE_FIELD_MAP.items():
+            if html_key in item:
+                kwargs[db_col] = str(item[html_key]).strip() or None
+        rows.append(ImmobileDB(**kwargs))
+    return rows
+
+
+def _parse_intestati(response_id: str, data: Optional[dict]) -> list[IntestatoDB]:
+    """Parse intestati from response JSON into structured rows."""
+    if not data or not isinstance(data, dict):
+        return []
+    rows = []
+    for item in data.get("intestati", []):
+        if not isinstance(item, dict):
+            continue
+        kwargs: dict[str, Any] = {"response_id": response_id}
+        for html_key, db_col in INTESTATO_FIELD_MAP.items():
+            if html_key in item:
+                val = str(item[html_key]).strip() or None
+                # For nominativo, concatenate if Cognome+Nome pattern
+                if db_col == "nominativo" and kwargs.get("nominativo") and val:
+                    kwargs["nominativo"] = f"{kwargs['nominativo']} {val}"
+                else:
+                    kwargs[db_col] = val
+        rows.append(IntestatoDB(**kwargs))
+    return rows
 
 
 async def save_response(
@@ -145,43 +228,47 @@ async def save_response(
     data: Optional[dict] = None,
     error: Optional[str] = None,
 ) -> None:
-    """Persist a visura response (result or error)."""
-    db = await get_db()
-    try:
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO visura_responses
-                (request_id, success, tipo_catasto, data, error)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (request_id, int(success), tipo_catasto, json.dumps(data) if data else None, error),
+    """Persist a response and populate structured tables."""
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        # Delete existing response + related rows if any (upsert)
+        await session.execute(text("DELETE FROM intestati WHERE response_id = :rid"), {"rid": request_id})
+        await session.execute(text("DELETE FROM immobili WHERE response_id = :rid"), {"rid": request_id})
+        await session.execute(text("DELETE FROM visura_responses WHERE request_id = :rid"), {"rid": request_id})
+
+        resp = VisuraResponseDB(
+            request_id=request_id,
+            success=success,
+            tipo_catasto=tipo_catasto,
+            data=data,
+            error=error,
         )
-        await db.commit()
-    finally:
-        await db.close()
+        session.add(resp)
+
+        # Populate structured tables from JSON
+        for imm in _parse_immobili(request_id, tipo_catasto, data):
+            session.add(imm)
+        for intest in _parse_intestati(request_id, data):
+            session.add(intest)
+
+        await session.commit()
 
 
 async def get_response(request_id: str) -> Optional[dict]:
     """Fetch a stored response by request_id. Returns None if not found."""
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            "SELECT request_id, success, tipo_catasto, data, error, created_at FROM visura_responses WHERE request_id = ?",
-            (request_id,),
-        )
-        row = await cursor.fetchone()
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        row = await session.get(VisuraResponseDB, request_id)
         if row is None:
             return None
         return {
-            "request_id": row["request_id"],
-            "success": bool(row["success"]),
-            "tipo_catasto": row["tipo_catasto"],
-            "data": json.loads(row["data"]) if row["data"] else None,
-            "error": row["error"],
-            "created_at": row["created_at"],
+            "request_id": row.request_id,
+            "success": row.success,
+            "tipo_catasto": row.tipo_catasto,
+            "data": row.data,
+            "error": row.error,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
         }
-    finally:
-        await db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -199,114 +286,103 @@ async def find_responses(
     offset: int = 0,
 ) -> list[dict]:
     """Search stored responses by cadastral coordinates."""
-    conditions = []
-    params: list = []
-
-    if provincia:
-        conditions.append("r.provincia = ?")
-        params.append(provincia)
-    if comune:
-        conditions.append("r.comune = ?")
-        params.append(comune)
-    if foglio:
-        conditions.append("r.foglio = ?")
-        params.append(foglio)
-    if particella:
-        conditions.append("r.particella = ?")
-        params.append(particella)
-    if tipo_catasto:
-        conditions.append("r.tipo_catasto = ?")
-        params.append(tipo_catasto)
-
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    params.extend([limit, offset])
-
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            f"""
-            SELECT r.request_id, r.request_type, r.tipo_catasto, r.provincia, r.comune,
-                   r.foglio, r.particella, r.sezione, r.subalterno, r.created_at AS requested_at,
-                   resp.success, resp.data, resp.error, resp.created_at AS responded_at
-            FROM visura_requests r
-            LEFT JOIN visura_responses resp ON r.request_id = resp.request_id
-            {where}
-            ORDER BY r.created_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            params,
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        stmt = (
+            select(VisuraRequestDB, VisuraResponseDB)
+            .outerjoin(VisuraResponseDB, VisuraRequestDB.request_id == VisuraResponseDB.request_id)
         )
-        rows = await cursor.fetchall()
+        if provincia:
+            stmt = stmt.where(VisuraRequestDB.provincia == provincia)
+        if comune:
+            stmt = stmt.where(VisuraRequestDB.comune == comune)
+        if foglio:
+            stmt = stmt.where(VisuraRequestDB.foglio == foglio)
+        if particella:
+            stmt = stmt.where(VisuraRequestDB.particella == particella)
+        if tipo_catasto:
+            stmt = stmt.where(VisuraRequestDB.tipo_catasto == tipo_catasto)
+
+        stmt = stmt.order_by(VisuraRequestDB.created_at.desc()).limit(limit).offset(offset)
+
+        result = await session.execute(stmt)
+        rows = result.all()
+
         return [
             {
-                "request_id": row["request_id"],
-                "request_type": row["request_type"],
-                "tipo_catasto": row["tipo_catasto"],
-                "provincia": row["provincia"],
-                "comune": row["comune"],
-                "foglio": row["foglio"],
-                "particella": row["particella"],
-                "sezione": row["sezione"],
-                "subalterno": row["subalterno"],
-                "requested_at": row["requested_at"],
-                "success": bool(row["success"]) if row["success"] is not None else None,
-                "data": json.loads(row["data"]) if row["data"] else None,
-                "error": row["error"],
-                "responded_at": row["responded_at"],
+                "request_id": req.request_id,
+                "request_type": req.request_type,
+                "tipo_catasto": req.tipo_catasto,
+                "provincia": req.provincia,
+                "comune": req.comune,
+                "foglio": req.foglio,
+                "particella": req.particella,
+                "sezione": req.sezione,
+                "subalterno": req.subalterno,
+                "requested_at": req.created_at.isoformat() if req.created_at else None,
+                "success": resp.success if resp else None,
+                "data": resp.data if resp else None,
+                "error": resp.error if resp else None,
+                "responded_at": resp.created_at.isoformat() if resp and resp.created_at else None,
             }
-            for row in rows
+            for req, resp in rows
         ]
-    finally:
-        await db.close()
 
 
 async def cleanup_old_responses(ttl_seconds: int) -> int:
     """Delete responses older than ttl_seconds. Returns count of deleted rows."""
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            """
-            DELETE FROM visura_responses
-            WHERE (julianday('now', 'localtime') - julianday(created_at)) * 86400 > ?
-            """,
-            (ttl_seconds,),
-        )
-        deleted = cursor.rowcount
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        cutoff = datetime.now() - timedelta(seconds=ttl_seconds)
+
+        # Find expired responses
+        stmt = select(VisuraResponseDB).where(VisuraResponseDB.created_at < cutoff)
+        result = await session.execute(stmt)
+        expired = result.scalars().all()
+        deleted = len(expired)
+
+        for resp in expired:
+            await session.delete(resp)
+
         if deleted:
-            await db.execute(
-                """
-                DELETE FROM visura_requests
-                WHERE request_id NOT IN (SELECT request_id FROM visura_responses)
-                  AND (julianday('now', 'localtime') - julianday(created_at)) * 86400 > ?
-                """,
-                (ttl_seconds,),
+            # Also delete orphaned requests
+            orphan_stmt = select(VisuraRequestDB).where(
+                VisuraRequestDB.created_at < cutoff,
+                ~VisuraRequestDB.request_id.in_(
+                    select(VisuraResponseDB.request_id)
+                ),
             )
-        await db.commit()
+            orphan_result = await session.execute(orphan_stmt)
+            for req in orphan_result.scalars().all():
+                await session.delete(req)
+
+        await session.commit()
         return deleted
-    finally:
-        await db.close()
 
 
 async def count_responses() -> dict:
     """Return basic stats about stored data."""
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            """
-            SELECT
-                COUNT(*) AS total_requests,
-                (SELECT COUNT(*) FROM visura_responses) AS total_responses,
-                (SELECT COUNT(*) FROM visura_responses WHERE success = 1) AS successful,
-                (SELECT COUNT(*) FROM visura_responses WHERE success = 0) AS failed
-            FROM visura_requests
-            """
-        )
-        row = await cursor.fetchone()
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        total_requests = (await session.execute(
+            select(text("count(*)")).select_from(VisuraRequestDB)
+        )).scalar() or 0
+
+        total_responses = (await session.execute(
+            select(text("count(*)")).select_from(VisuraResponseDB)
+        )).scalar() or 0
+
+        successful = (await session.execute(
+            select(text("count(*)")).select_from(VisuraResponseDB).where(VisuraResponseDB.success == True)  # noqa: E712
+        )).scalar() or 0
+
+        failed = (await session.execute(
+            select(text("count(*)")).select_from(VisuraResponseDB).where(VisuraResponseDB.success == False)  # noqa: E712
+        )).scalar() or 0
+
         return {
-            "total_requests": row["total_requests"],
-            "total_responses": row["total_responses"],
-            "successful": row["successful"],
-            "failed": row["failed"],
+            "total_requests": total_requests,
+            "total_responses": total_responses,
+            "successful": successful,
+            "failed": failed,
         }
-    finally:
-        await db.close()

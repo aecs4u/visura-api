@@ -119,7 +119,11 @@ class VisuraClient:
         *,
         json: dict | None = None,
         params: dict | None = None,
+        force: bool = False,
     ) -> dict:
+        if force:
+            params = dict(params or {})
+            params["force"] = "true"
         async with self._get_client() as client:
             resp = await client.request(method, path, json=json, params=params)
         if resp.status_code >= 400:
@@ -143,6 +147,7 @@ class VisuraClient:
         tipo_catasto: str | None = None,
         sezione: str | None = None,
         subalterno: str | None = None,
+        force: bool = False,
     ) -> dict:
         """Submit an immobili search (POST /visura)."""
         payload: dict[str, Any] = {
@@ -157,7 +162,7 @@ class VisuraClient:
             payload["sezione"] = sezione
         if subalterno:
             payload["subalterno"] = subalterno
-        return await self._request("POST", "/visura", json=payload)
+        return await self._request("POST", "/visura", json=payload, force=force)
 
     async def intestati(
         self,
@@ -169,6 +174,7 @@ class VisuraClient:
         tipo_catasto: str,
         subalterno: str | None = None,
         sezione: str | None = None,
+        force: bool = False,
     ) -> dict:
         """Submit an owners (intestati) lookup (POST /visura/intestati)."""
         payload: dict[str, Any] = {
@@ -182,7 +188,7 @@ class VisuraClient:
             payload["subalterno"] = subalterno
         if sezione:
             payload["sezione"] = sezione
-        return await self._request("POST", "/visura/intestati", json=payload)
+        return await self._request("POST", "/visura/intestati", json=payload, force=force)
 
     async def soggetto(
         self,
@@ -190,6 +196,7 @@ class VisuraClient:
         codice_fiscale: str,
         tipo_catasto: str | None = None,
         provincia: str | None = None,
+        force: bool = False,
     ) -> dict:
         """Submit a national subject search by codice fiscale (POST /visura/soggetto)."""
         payload: dict[str, Any] = {
@@ -199,7 +206,7 @@ class VisuraClient:
             payload["tipo_catasto"] = tipo_catasto.upper()
         if provincia:
             payload["provincia"] = provincia
-        return await self._request("POST", "/visura/soggetto", json=payload)
+        return await self._request("POST", "/visura/soggetto", json=payload, force=force)
 
     async def persona_giuridica(
         self,
@@ -207,6 +214,7 @@ class VisuraClient:
         identificativo: str,
         tipo_catasto: str | None = None,
         provincia: str | None = None,
+        force: bool = False,
     ) -> dict:
         """Submit a legal entity search by P.IVA or name (POST /visura/persona-giuridica)."""
         payload: dict[str, Any] = {"identificativo": identificativo}
@@ -214,7 +222,7 @@ class VisuraClient:
             payload["tipo_catasto"] = tipo_catasto.upper()
         if provincia:
             payload["provincia"] = provincia
-        return await self._request("POST", "/visura/persona-giuridica", json=payload)
+        return await self._request("POST", "/visura/persona-giuridica", json=payload, force=force)
 
     async def elenco_immobili(
         self,
@@ -224,6 +232,7 @@ class VisuraClient:
         tipo_catasto: str | None = None,
         foglio: str | None = None,
         sezione: str | None = None,
+        force: bool = False,
     ) -> dict:
         """Submit a property listing request (POST /visura/elenco-immobili)."""
         payload: dict[str, Any] = {"provincia": provincia, "comune": comune}
@@ -233,7 +242,7 @@ class VisuraClient:
             payload["foglio"] = foglio
         if sezione:
             payload["sezione"] = sezione
-        return await self._request("POST", "/visura/elenco-immobili", json=payload)
+        return await self._request("POST", "/visura/elenco-immobili", json=payload, force=force)
 
     async def generic_search(
         self,
@@ -242,6 +251,7 @@ class VisuraClient:
         provincia: str,
         comune: str | None = None,
         tipo_catasto: str | None = None,
+        force: bool = False,
         **params,
     ) -> dict:
         """Submit a generic SISTER search (POST /visura/{search_type})."""
@@ -253,7 +263,7 @@ class VisuraClient:
         for k, v in params.items():
             if v is not None:
                 query[k] = v
-        return await self._request("POST", f"/visura/{search_type}", params=query)
+        return await self._request("POST", f"/visura/{search_type}", params=query, force=force)
 
     async def get_result(self, request_id: str) -> dict:
         """Poll a single request result (GET /visura/{request_id})."""

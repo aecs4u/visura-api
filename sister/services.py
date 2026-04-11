@@ -13,6 +13,8 @@ from playwright.async_api import Page
 
 from .database import (
     cleanup_old_responses,
+    compute_cache_key,
+    find_cached_response,
     save_request,
     save_requests_batch,
     save_response,
@@ -26,6 +28,7 @@ from .models import (
     ElencoImmobiliRequest,
     GenericSisterRequest,
     QueueFullError,
+    SubmitResult,
     VisuraIntestatiRequest,
     VisuraPersonaGiuridicaRequest,
     VisuraRequest,
@@ -596,9 +599,38 @@ class VisuraService:
             timestamp=timestamp,
         )
 
+    @staticmethod
+    def _request_cache_params(request_type: str, request) -> dict:
+        """Extract cache-relevant parameters from a request."""
+        params = {"tipo_catasto": getattr(request, "tipo_catasto", "")}
+        for attr in ("provincia", "comune", "foglio", "particella", "sezione", "subalterno",
+                      "codice_fiscale", "identificativo", "search_type"):
+            val = getattr(request, attr, None)
+            if val:
+                params[attr] = val
+        # For GenericSisterRequest, include the params dict
+        if hasattr(request, "params") and request.params:
+            params.update(request.params)
+        return params
+
+    async def _check_cache(self, request_type: str, request, force: bool = False) -> Optional[SubmitResult]:
+        """Check if a cached response exists. Returns SubmitResult if cached, None otherwise."""
+        if force:
+            return None
+        params = self._request_cache_params(request_type, request)
+        cache_key = compute_cache_key(request_type, **params)
+        record = await find_cached_response(cache_key, self.response_ttl_seconds)
+        if record is None:
+            return None
+        response = self._response_from_db_record(record)
+        logger.info("Cache hit for %s %s (key=%s...)", request_type, request.request_id, cache_key[:12])
+        return SubmitResult(request_id=record["request_id"], cached=True, response=response)
+
     async def _persist_single_request(
         self, request_type: str, request: VisuraRequest | VisuraIntestatiRequest | VisuraSoggettoRequest
     ):
+        params = self._request_cache_params(request_type, request)
+        cache_key = compute_cache_key(request_type, **params)
         try:
             await save_request(
                 request_id=request.request_id,
@@ -610,6 +642,7 @@ class VisuraService:
                 particella=getattr(request, "particella", None) or getattr(request, "codice_fiscale", ""),
                 sezione=getattr(request, "sezione", None),
                 subalterno=getattr(request, "subalterno", None),
+                cache_key=cache_key,
             )
         except Exception as e:
             logger.error(f"Errore persistenza richiesta {request.request_id}: {e}")
@@ -658,93 +691,73 @@ class VisuraService:
             self.pending_request_ids.discard(request.request_id)
             raise QueueFullError(f"Coda piena (max {self._queue_limit()})") from e
 
-    async def add_request(self, request: VisuraRequest) -> str:
-        """Aggiunge una richiesta alla coda"""
+    async def _add_single(self, request_type: str, request, force: bool = False) -> SubmitResult:
+        """Generic add: check cache, then enqueue if needed."""
+        cached = await self._check_cache(request_type, request, force=force)
+        if cached is not None:
+            return cached
         async with self._queue_lock:
             self._ensure_processing()
             self._ensure_capacity(required_slots=1)
-            await self._persist_single_request("visura", request)
+            await self._persist_single_request(request_type, request)
             self._enqueue_request_nowait(request)
         logger.info(
-            f"Richiesta visura {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
+            f"Richiesta {request_type} {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
         )
-        return request.request_id
+        return SubmitResult(request_id=request.request_id)
 
-    async def add_intestati_request(self, request: VisuraIntestatiRequest) -> str:
-        """Aggiunge una richiesta intestati alla coda"""
-        async with self._queue_lock:
-            self._ensure_processing()
-            self._ensure_capacity(required_slots=1)
-            await self._persist_single_request("intestati", request)
-            self._enqueue_request_nowait(request)
-        logger.info(
-            f"Richiesta intestati {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
-        )
-        return request.request_id
+    async def add_request(self, request: VisuraRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta alla coda (or returns cached)."""
+        return await self._add_single("visura", request, force=force)
 
-    async def add_soggetto_request(self, request: VisuraSoggettoRequest) -> str:
-        """Aggiunge una richiesta soggetto alla coda"""
-        async with self._queue_lock:
-            self._ensure_processing()
-            self._ensure_capacity(required_slots=1)
-            await self._persist_single_request("soggetto", request)
-            self._enqueue_request_nowait(request)
-        logger.info(
-            f"Richiesta soggetto {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
-        )
-        return request.request_id
+    async def add_intestati_request(self, request: VisuraIntestatiRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta intestati alla coda."""
+        return await self._add_single("intestati", request, force=force)
 
-    async def add_persona_giuridica_request(self, request: VisuraPersonaGiuridicaRequest) -> str:
-        """Aggiunge una richiesta persona giuridica alla coda"""
-        async with self._queue_lock:
-            self._ensure_processing()
-            self._ensure_capacity(required_slots=1)
-            await self._persist_single_request("persona_giuridica", request)
-            self._enqueue_request_nowait(request)
-        logger.info(
-            f"Richiesta PNF {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
-        )
-        return request.request_id
+    async def add_soggetto_request(self, request: VisuraSoggettoRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta soggetto alla coda."""
+        return await self._add_single("soggetto", request, force=force)
 
-    async def add_generic_request(self, request: GenericSisterRequest) -> str:
-        """Aggiunge una richiesta generica alla coda"""
-        async with self._queue_lock:
-            self._ensure_processing()
-            self._ensure_capacity(required_slots=1)
-            await self._persist_single_request(request.search_type, request)
-            self._enqueue_request_nowait(request)
-        logger.info(
-            f"Richiesta {request.search_type} {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
-        )
-        return request.request_id
+    async def add_persona_giuridica_request(self, request: VisuraPersonaGiuridicaRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta persona giuridica alla coda."""
+        return await self._add_single("persona_giuridica", request, force=force)
 
-    async def add_elenco_immobili_request(self, request: ElencoImmobiliRequest) -> str:
-        """Aggiunge una richiesta elenco immobili alla coda"""
-        async with self._queue_lock:
-            self._ensure_processing()
-            self._ensure_capacity(required_slots=1)
-            await self._persist_single_request("elenco_immobili", request)
-            self._enqueue_request_nowait(request)
-        logger.info(
-            f"Richiesta elenco immobili {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
-        )
-        return request.request_id
+    async def add_generic_request(self, request: GenericSisterRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta generica alla coda."""
+        return await self._add_single(request.search_type, request, force=force)
 
-    async def add_requests_batch(self, requests: list[VisuraRequest]) -> list[str]:
+    async def add_elenco_immobili_request(self, request: ElencoImmobiliRequest, force: bool = False) -> str | SubmitResult:
+        """Aggiunge una richiesta elenco immobili alla coda."""
+        return await self._add_single("elenco_immobili", request, force=force)
+
+    async def add_requests_batch(self, requests: list[VisuraRequest], force: bool = False) -> list[str | SubmitResult]:
         """Accoda più richieste in modo atomico lato producer."""
         if not requests:
             return []
 
-        async with self._queue_lock:
-            self._ensure_processing()
-            self._ensure_capacity(required_slots=len(requests))
-            await self._persist_request_batch(requests)
-            for request in requests:
-                self._enqueue_request_nowait(request)
+        results: list[str | SubmitResult] = []
+        to_enqueue: list[VisuraRequest] = []
 
         for request in requests:
-            logger.info(f"Richiesta visura {request.request_id} aggiunta alla coda")
-        return [request.request_id for request in requests]
+            if not force:
+                cached = await self._check_cache("visura", request, force=False)
+                if cached is not None:
+                    results.append(cached)
+                    continue
+            to_enqueue.append(request)
+            results.append(SubmitResult(request_id=request.request_id))
+
+        if to_enqueue:
+            async with self._queue_lock:
+                self._ensure_processing()
+                self._ensure_capacity(required_slots=len(to_enqueue))
+                await self._persist_request_batch(to_enqueue)
+                for request in to_enqueue:
+                    self._enqueue_request_nowait(request)
+            for request in to_enqueue:
+                logger.info(f"Richiesta visura {request.request_id} aggiunta alla coda")
+
+        return results
 
     async def get_response(self, request_id: str) -> Optional[VisuraResponse]:
         """Ottiene la risposta per un request_id"""

@@ -28,12 +28,43 @@ from .models import (
     VisuraSoggettoInput,
     VisuraSoggettoRequest,
 )
+from .models import SubmitResult
 from .services import VisuraService
 
 logger = logging.getLogger("sister")
 
 
-async def richiedi_visura(request: VisuraInput, service: VisuraService):
+def _submit_result_to_response(results: list, tipos_catasto: list, message: str):
+    """Convert SubmitResult list to JSONResponse, handling cached results."""
+    any_cached = any(isinstance(r, SubmitResult) and r.cached for r in results)
+    request_ids = []
+    cached_data = []
+    for r in results:
+        if isinstance(r, SubmitResult):
+            request_ids.append(r.request_id)
+            if r.cached and r.response:
+                cached_data.append({
+                    "request_id": r.request_id,
+                    "tipo_catasto": r.response.tipo_catasto,
+                    "status": "completed" if r.response.success else "error",
+                    "data": r.response.data,
+                    "error": r.response.error,
+                })
+        elif isinstance(r, str):
+            request_ids.append(r)
+
+    resp: dict = {
+        "request_ids": request_ids,
+        "tipos_catasto": tipos_catasto,
+        "status": "cached" if any_cached and len(cached_data) == len(results) else "queued",
+        "message": message,
+    }
+    if cached_data:
+        resp["cached_results"] = cached_data
+    return JSONResponse(resp)
+
+
+async def richiedi_visura(request: VisuraInput, service: VisuraService, force: bool = False):
     """Richiede una visura catastale fornendo direttamente i dati catastali"""
     try:
         sezione = None if request.sezione == "_" else request.sezione
@@ -54,15 +85,11 @@ async def richiedi_visura(request: VisuraInput, service: VisuraService):
                     subalterno=request.subalterno,
                 )
             )
-        request_ids = await service.add_requests_batch(visura_requests)
+        results = await service.add_requests_batch(visura_requests, force=force)
 
-        return JSONResponse(
-            {
-                "request_ids": request_ids,
-                "tipos_catasto": tipos_catasto,
-                "status": "queued",
-                "message": f"Richieste aggiunte alla coda per {request.comune} F.{request.foglio} P.{request.particella}",
-            }
+        return _submit_result_to_response(
+            results, tipos_catasto,
+            f"Richieste per {request.comune} F.{request.foglio} P.{request.particella}",
         )
 
     except HTTPException:
@@ -119,7 +146,7 @@ async def ottieni_visura(request_id: str, service: VisuraService):
         raise HTTPException(status_code=500, detail="Errore interno del server")
 
 
-async def richiedi_intestati_immobile(request: VisuraIntestatiInput, service: VisuraService):
+async def richiedi_intestati_immobile(request: VisuraIntestatiInput, service: VisuraService, force: bool = False):
     """Richiede gli intestati per un immobile specifico."""
     try:
         sezione = None if request.sezione == "_" else request.sezione
@@ -137,7 +164,7 @@ async def richiedi_intestati_immobile(request: VisuraIntestatiInput, service: Vi
             sezione=sezione,
         )
 
-        await service.add_intestati_request(intestati_request)
+        result = await service.add_intestati_request(intestati_request, force=force)
 
         return JSONResponse(
             {
@@ -252,7 +279,7 @@ async def extract_sezioni(request: SezioniExtractionRequest, service: VisuraServ
         raise HTTPException(status_code=500, detail="Errore interno del server")
 
 
-async def richiedi_visura_soggetto(request: VisuraSoggettoInput, service: VisuraService):
+async def richiedi_visura_soggetto(request: VisuraSoggettoInput, service: VisuraService, force: bool = False):
     """Ricerca per soggetto (codice fiscale) — ambito nazionale o provinciale."""
     try:
         tipo_catasto = request.tipo_catasto or "E"
@@ -265,7 +292,7 @@ async def richiedi_visura_soggetto(request: VisuraSoggettoInput, service: Visura
             provincia=request.provincia,
         )
 
-        await service.add_soggetto_request(soggetto_request)
+        result = await service.add_soggetto_request(soggetto_request, force=force)
 
         return JSONResponse(
             {
@@ -290,7 +317,7 @@ async def richiedi_visura_soggetto(request: VisuraSoggettoInput, service: Visura
         raise HTTPException(status_code=500, detail="Errore interno del server")
 
 
-async def richiedi_visura_persona_giuridica(request: VisuraPersonaGiuridicaInput, service: VisuraService):
+async def richiedi_visura_persona_giuridica(request: VisuraPersonaGiuridicaInput, service: VisuraService, force: bool = False):
     """Ricerca per persona giuridica (P.IVA o denominazione)."""
     try:
         tipo_catasto = request.tipo_catasto or "E"
@@ -303,7 +330,7 @@ async def richiedi_visura_persona_giuridica(request: VisuraPersonaGiuridicaInput
             provincia=request.provincia,
         )
 
-        await service.add_persona_giuridica_request(pnf_request)
+        result = await service.add_persona_giuridica_request(pnf_request, force=force)
 
         return JSONResponse({
             "request_id": request_id,
@@ -326,7 +353,7 @@ async def richiedi_visura_persona_giuridica(request: VisuraPersonaGiuridicaInput
         raise HTTPException(status_code=500, detail="Errore interno del server")
 
 
-async def richiedi_elenco_immobili(request: ElencoImmobiliInput, service: VisuraService):
+async def richiedi_elenco_immobili(request: ElencoImmobiliInput, service: VisuraService, force: bool = False):
     """Elenco immobili per un comune."""
     try:
         tipo_catasto = request.tipo_catasto or "T"
@@ -341,7 +368,7 @@ async def richiedi_elenco_immobili(request: ElencoImmobiliInput, service: Visura
             sezione=request.sezione,
         )
 
-        await service.add_elenco_immobili_request(eimm_request)
+        result = await service.add_elenco_immobili_request(eimm_request, force=force)
 
         return JSONResponse({
             "request_id": request_id,
@@ -371,6 +398,7 @@ async def richiedi_generic_sister(
     comune: Optional[str] = None,
     tipo_catasto: str = "T",
     params: Optional[dict] = None,
+    force: bool = False,
 ):
     """Generic handler for SISTER search types (IND, PART, NOTA, EM, EXPM, OOII, FID, ISP, ISPCART)."""
     try:
@@ -385,7 +413,15 @@ async def richiedi_generic_sister(
             params=params or {},
         )
 
-        await service.add_generic_request(request)
+        submit = await service.add_generic_request(request, force=force)
+
+        if isinstance(submit, SubmitResult) and submit.cached and submit.response:
+            return JSONResponse({
+                "request_id": submit.request_id,
+                "search_type": search_type,
+                "status": "cached",
+                "data": submit.response.data,
+            })
 
         return JSONResponse({
             "request_id": request_id,

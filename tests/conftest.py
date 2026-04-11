@@ -161,6 +161,8 @@ def main_module(monkeypatch):
     monkeypatch.setattr(services_mod, "save_response", _noop, raising=False)
     monkeypatch.setattr(services_mod, "cleanup_old_responses", _zero, raising=False)
     monkeypatch.setattr(services_mod, "load_stored_response", _noop, raising=False)
+    monkeypatch.setattr(services_mod, "find_cached_response", _noop, raising=False)
+    monkeypatch.setattr(services_mod, "compute_cache_key", lambda *a, **kw: "test_key", raising=False)
     monkeypatch.setattr(routes_mod, "find_responses", _empty_list, raising=False)
     monkeypatch.setattr(routes_mod, "count_responses", _db_stats, raising=False)
 
