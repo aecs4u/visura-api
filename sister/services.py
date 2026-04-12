@@ -477,8 +477,23 @@ class BrowserManager:
         logger.info("Browser chiuso")
 
     async def graceful_shutdown(self):
-        """Effettua uno shutdown graceful con logout"""
+        """Effettua uno shutdown graceful con logout dalla sessione SISTER"""
         logger.info("Iniziando shutdown graceful...")
+        # Close SISTER session first (prevents "active session" on next start)
+        try:
+            page = self.auth_page
+            if page and not page.is_closed():
+                for url in [
+                    "https://sister3.agenziaentrate.gov.it/Servizi/CloseSessionsSis",
+                    "https://sister3.agenziaentrate.gov.it/Servizi/CloseSessions",
+                ]:
+                    try:
+                        await page.goto(url, timeout=10000)
+                        logger.info("Sessione SISTER chiusa: %s", url)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("Errore chiusura sessione SISTER: %s", e)
         await self._auth.graceful_shutdown()
         logger.info("Shutdown graceful completato")
 
@@ -514,16 +529,90 @@ class VisuraService:
             logger.warning(f"{var_name} non valido ({raw!r}), uso default={default}")
             return default
 
-    async def initialize(self):
-        """Inizializza il servizio"""
-        await self.browser_manager.initialize()
-        await self.browser_manager.login()
-        await self.browser_manager.start_keep_alive()
+    async def initialize(self, background_auth: bool = True):
+        """Inizializza il servizio.
 
-        # Avvia il worker per processare le richieste
+        Args:
+            background_auth: If True, browser init + login run in a background task
+                so the app starts immediately. Queries wait until auth completes.
+        """
         self.processing = True
         self._worker_task = asyncio.create_task(self._process_requests(), name="visura-request-worker")
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup(), name="visura-cache-cleanup")
+
+        if background_auth:
+            self._auth_task = asyncio.create_task(self._background_auth(), name="visura-browser-auth")
+        else:
+            await self._do_auth()
+
+    async def _do_auth(self):
+        """Run browser initialization and login."""
+        await self.browser_manager.initialize()
+        await self.browser_manager.login()
+        await self.browser_manager.start_keep_alive()
+        self._auth_ready = True
+        logger.info("Browser autenticato e pronto")
+
+    async def _background_auth(self):
+        """Background task: initialize browser and login with retry.
+
+        On "active session" errors, attempts to close the stale session first
+        by navigating to the SISTER logout URL.
+        """
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info("Autenticazione browser in corso (tentativo %d/%d)...", attempt, max_retries)
+                await self._do_auth()
+                return
+            except Exception as e:
+                err_msg = str(e)
+                logger.error("Autenticazione fallita (tentativo %d/%d): %s", attempt, max_retries, err_msg)
+
+                # If session locked, try to close it via logout URL
+                if "active session" in err_msg.lower() or "già in sessione" in err_msg.lower():
+                    await self._try_close_stale_session()
+
+                if attempt < max_retries:
+                    wait = 15 * attempt
+                    logger.info("Riprovo tra %ds...", wait)
+                    await asyncio.sleep(wait)
+        logger.error("Autenticazione browser fallita dopo %d tentativi — le query browser non funzioneranno", max_retries)
+
+    async def _try_close_stale_session(self):
+        """Attempt to close a stale SISTER session by hitting the logout URL."""
+        try:
+            page = self.browser_manager._auth._auth_page
+            if not page or page.is_closed():
+                # Create a temporary page
+                ctx = self.browser_manager._auth._context
+                if ctx:
+                    page = await ctx.new_page()
+                else:
+                    return
+
+            logout_urls = [
+                "https://sister3.agenziaentrate.gov.it/Servizi/CloseSessionsSis",
+                "https://sister3.agenziaentrate.gov.it/Servizi/CloseSessions",
+            ]
+            for url in logout_urls:
+                try:
+                    await page.goto(url, timeout=15000)
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    logger.info("Sessione SISTER chiusa via %s", url)
+                except Exception:
+                    pass
+
+            # Close the temp page if we created one
+            if page != self.browser_manager._auth._auth_page:
+                await page.close()
+
+        except Exception as e:
+            logger.warning("Impossibile chiudere sessione stale: %s", e)
+
+    @property
+    def auth_ready(self) -> bool:
+        return getattr(self, "_auth_ready", False)
 
     async def _process_requests(self):
         """Processa le richieste in coda"""
@@ -536,6 +625,18 @@ class VisuraService:
                     if request is None:
                         logger.info("Ricevuto segnale di stop worker")
                         return
+
+                    # Wait for auth to be ready before processing browser requests
+                    if not self.auth_ready:
+                        logger.info("In attesa dell'autenticazione browser...")
+                        for _ in range(60):  # wait up to 5 minutes
+                            if self.auth_ready:
+                                break
+                            await asyncio.sleep(5)
+                        if not self.auth_ready:
+                            logger.error("Autenticazione non completata — richiesta scartata")
+                            self.request_queue.task_done()
+                            continue
 
                     if isinstance(request, VisuraRequest):
                         response = await self.browser_manager.esegui_visura(request)
@@ -898,13 +999,30 @@ class VisuraService:
         return "not_found"
 
     async def shutdown(self):
-        """Chiude il servizio"""
+        """Chiude il servizio (senza logout graceful)"""
+        auth_task = getattr(self, "_auth_task", None)
+        if auth_task and not auth_task.done():
+            auth_task.cancel()
+            try:
+                await auth_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await self._stop_worker()
         await self.browser_manager.close()
 
     async def graceful_shutdown(self):
         """Chiude il servizio con logout graceful"""
         logger.info("Iniziando graceful shutdown del servizio...")
+
+        # Cancel background auth if still running
+        auth_task = getattr(self, "_auth_task", None)
+        if auth_task and not auth_task.done():
+            auth_task.cancel()
+            try:
+                await auth_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         await self._stop_worker()
         await self.browser_manager.graceful_shutdown()
         logger.info("Graceful shutdown del servizio completato")

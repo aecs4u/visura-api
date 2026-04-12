@@ -31,21 +31,35 @@ class PageLogger(_BasePageLogger):
                 safe_name = re.sub(r"[^\w\-]", "_", step_name)
                 filename = f"{self.step:02d}_{self.flow_name}_{safe_name}.png"
                 filepath = os.path.join(pages_dir, filename)
-                await asyncio.wait_for(page.screenshot(path=filepath, full_page=True), timeout=10)
+                await asyncio.wait_for(page.screenshot(path=filepath, full_page=True), timeout=5)
                 screenshot_url = f"/outputs/pages/{_BasePageLogger._session_id or 'unknown'}/{filename}"
         except Exception as e:
             log.debug("Screenshot save failed: %s", e)
 
-        # Collect page metadata for response
+        # Collect page metadata — only extract form elements on form_compilato steps
         try:
             if page and not page.is_closed():
-                visit = await asyncio.wait_for(
-                    _collect_page_metadata(page, step_name, screenshot_url), timeout=10
-                )
-                self.page_visits.append(visit)
-        except Exception as e:
-            log.debug("Page metadata collection failed: %s", e)
-            self.page_visits.append({"step": step_name, "url": page.url if page else "", "timestamp": datetime.now().isoformat(), "screenshot_url": screenshot_url, "form_elements": [], "errors": []})
+                form_elements = []
+                errors = []
+                if "form_compilato" in step_name:
+                    try:
+                        visit = await asyncio.wait_for(
+                            _collect_page_metadata(page, step_name, screenshot_url), timeout=5
+                        )
+                        form_elements = visit.get("form_elements", [])
+                        errors = visit.get("errors", [])
+                    except Exception:
+                        pass
+                self.page_visits.append({
+                    "step": step_name,
+                    "url": page.url,
+                    "timestamp": datetime.now().isoformat(),
+                    "screenshot_url": screenshot_url,
+                    "form_elements": form_elements,
+                    "errors": errors,
+                })
+        except Exception:
+            pass
 
 
 async def _collect_page_metadata(page: Page, step_name: str, screenshot_url: str | None = None) -> dict:
@@ -526,8 +540,6 @@ async def run_visura(
     except Exception as e:
         log.debug("Conferma subalterno non necessaria: %s", e)
 
-    await page_logger.log(page, "risultati")
-
     # STEP 3.1: Controlla se la ricerca ha restituito risultati
     page_text = await page.inner_text("body")
     if "NESSUNA CORRISPONDENZA TROVATA" in page_text:
@@ -639,8 +651,8 @@ async def run_visura(
             active_indices = []
             bene_comune_indices = set()
 
-        processed = 0
-        for radio_idx in active_indices:
+        total_active = len(active_indices)
+        for item_num, radio_idx in enumerate(active_indices, 1):
             imm_data = immobili[radio_idx] if radio_idx < len(immobili) else {}
             is_bene_comune = radio_idx in bene_comune_indices
             step_result = {"result_index": radio_idx + 1, "immobile": imm_data, "intestati": [], "visura": None}
@@ -648,7 +660,10 @@ async def run_visura(
             # Select the radio button
             radio = radio_buttons.nth(radio_idx)
             await radio.click()
-            log.info("Selezionato immobile %d/%d (radio %d)%s", processed + 1, len(active_indices), radio_idx + 1,
+            log.info("[%d/%d] Immobile radio %d — Sub.%s %s%s",
+                     item_num, total_active, radio_idx + 1,
+                     imm_data.get("Sub", "?"),
+                     imm_data.get("Indirizzo", "")[:30],
                      " [Bene comune — skip intestati]" if is_bene_comune else "")
 
             # --- Click "Intestati" (skip for Bene comune non censibile) ---
@@ -670,33 +685,75 @@ async def run_visura(
                     await visura_sogg_btn.click()
                     await page.wait_for_load_state("networkidle", timeout=30000)
 
-                    # Set default options: Storica Analitica, XML, differita
-                    await _set_visura_form_defaults(page)
-                    await page_logger.log(page, f"visura_soggetto_{radio_idx + 1}")
+                    # Handle intermediate pages (RicercaPF, SceltaOmonimi, etc.)
+                    submitted = False
+                    for _nav in range(5):
+                        current_url = page.url
 
-                    # Extract data from the visura form page
-                    visura_sogg_data = await _extract_visura_immobile_playwright(page)
-                    step_result["visura_soggetto"] = visura_sogg_data
+                        # TipoVisura.do — the visura options form
+                        if "TipoVisura" in current_url:
+                            await _set_visura_form_defaults(page)
+                            await page_logger.log(page, f"visura_soggetto_{radio_idx + 1}")
+                            visura_sogg_data = await _extract_visura_immobile_playwright(page)
+                            step_result["visura_soggetto"] = visura_sogg_data
 
-                    # Wait for CAPTCHA → user fills code → form submits
-                    has_captcha = await _wait_for_captcha(page)
-                    if not has_captcha:
-                        inoltra_btn = page.locator("input[name='inoltra'][value='Inoltra'], input[type='submit'][value='Inoltra']")
-                        if await inoltra_btn.count() > 0:
-                            await inoltra_btn.click()
-                            await page.wait_for_load_state("networkidle", timeout=30000)
+                            has_captcha = await _wait_for_captcha(page)
+                            if not has_captcha:
+                                inoltra_btn = page.locator("input[name='inoltra'][value='Inoltra'], input[type='submit'][value='Inoltra']")
+                                if await inoltra_btn.count() > 0:
+                                    await inoltra_btn.click()
+                                    await page.wait_for_load_state("networkidle", timeout=30000)
+                            submitted = True
+                            break
 
-                    await page_logger.log(page, f"visura_soggetto_inoltrata_{radio_idx + 1}")
-                    log.info("Visura per Soggetto inoltrata per radio %d", radio_idx + 1)
+                        # RicercaPF.do — persona fisica search: click Ricerca to proceed
+                        if "RicercaPF" in current_url:
+                            log.info("Pagina RicercaPF — procedendo con ricerca")
+                            await page_logger.log(page, f"ricerca_pf_{radio_idx + 1}")
+                            ricerca_btn = page.locator("input[type='submit'][value='Ricerca'], input[name='ricerca'][value='Ricerca']")
+                            if await ricerca_btn.count() > 0:
+                                await ricerca_btn.first.click()
+                                await page.wait_for_load_state("networkidle", timeout=30000)
+                                continue
 
-                    # Go back to immobili list (may need multiple backs)
-                    await _navigate_back_to_immobili_list(page)
+                        # SceltaOmonimiPF.do — homonym selection: select first and proceed
+                        if "SceltaOmonimi" in current_url:
+                            log.info("Pagina SceltaOmonimi — selezionando primo soggetto")
+                            await page_logger.log(page, f"scelta_omonimi_{radio_idx + 1}")
+                            first_radio = page.locator("input[type='radio']").first
+                            if await first_radio.count() > 0:
+                                await first_radio.click()
+                            submit_btn = page.locator("input[type='submit'][value='Conferma'], input[type='submit'][value='Prosegui'], input[type='submit']").first
+                            if await submit_btn.count() > 0:
+                                await submit_btn.click()
+                                await page.wait_for_load_state("networkidle", timeout=30000)
+                                continue
+
+                        # InoltraRichiestaVis.do — already submitted
+                        if "InoltraRichiesta" in current_url:
+                            submitted = True
+                            break
+
+                        # Unknown page — log and break
+                        log.warning("Pagina inattesa durante Visura per Soggetto: %s", current_url)
+                        await page_logger.log(page, f"visura_soggetto_unexpected_{radio_idx + 1}")
+                        break
+
+                    if submitted:
+                        await page_logger.log(page, f"visura_soggetto_inoltrata_{radio_idx + 1}")
+                        log.info("Visura per Soggetto inoltrata per radio %d", radio_idx + 1)
+
+                    # Re-submit search to get immobili list back
+                    radio_buttons = await _resubmit_search_for_immobili_list(
+                        page, page_logger, provincia, comune, sezione, foglio, particella,
+                        tipo_catasto, subalterno, sezione_urbana,
+                    )
                 else:
                     # No "Visura per Soggetto" button — go back from intestati page
                     await _navigate_back_to_immobili_list(page)
+                    radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
 
-                # Re-select the same radio for the next action
-                radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+                # Re-select the same radio for the next action (Visura Per Immobile)
                 radio = radio_buttons.nth(radio_idx)
                 await radio.click()
 
@@ -727,18 +784,18 @@ async def run_visura(
                 await page_logger.log(page, f"visura_inoltrata_{radio_idx + 1}")
                 log.info("Visura Per Immobile inoltrata per radio %d", radio_idx + 1)
 
-                # Go back to immobili list (may need multiple backs)
-                await _navigate_back_to_immobili_list(page)
-
-                # Re-acquire radio buttons (DOM may have changed after navigation)
-                radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+                # Re-submit search to get immobili list back (SISTER loses session state after Inoltra)
+                radio_buttons = await _resubmit_search_for_immobili_list(
+                    page, page_logger, provincia, comune, sezione, foglio, particella,
+                    tipo_catasto, subalterno, sezione_urbana,
+                )
 
             await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
             results_list.append(step_result)
-            processed += 1
+            log.info("[%d/%d] Completato immobile radio %d", item_num, total_active, radio_idx + 1)
 
     except Exception as e:
-        log.error("Errore estrazione intestati/visure: %s", e)
+        log.error("Errore estrazione intestati/visure (item %d/%d): %s", item_num if 'item_num' in dir() else 0, total_active if 'total_active' in dir() else 0, e)
 
     if not results_list and immobili:
         results_list = [{"result_index": 1, "immobile": immobili[0] if immobili else {}, "intestati": all_intestati}]
@@ -768,57 +825,161 @@ async def run_visura(
     return result
 
 
+async def _resubmit_search_for_immobili_list(
+    page, page_logger, provincia, comune, sezione, foglio, particella,
+    tipo_catasto, subalterno, sezione_urbana,
+):
+    """Re-submit the property search to restore the immobili list.
+
+    After submitting "Visura Per Immobile" or "Visura per Soggetto", SISTER
+    loses the session state for the immobili list. We need to re-navigate
+    from SceltaServizio and re-submit the search to get the radio buttons back.
+
+    Returns a fresh radio_buttons locator.
+    """
+    log.info("Ri-eseguendo ricerca per ripristinare lista immobili...")
+
+    await _navigate_to_scelta_servizio(page, page_logger)
+
+    provincia_value = await find_best_option_match(page, "select[name='listacom']", provincia)
+    if provincia_value:
+        await page.locator("select[name='listacom']").select_option(provincia_value)
+    await page.locator("input[type='submit'][value='Applica']").click()
+    await page.wait_for_load_state("networkidle", timeout=30000)
+
+    await page.get_by_role("link", name="Immobile").click()
+    await page.wait_for_load_state("networkidle", timeout=30000)
+
+    await page.locator("select[name='tipoCatasto']").select_option(tipo_catasto)
+
+    comune_value = await find_best_option_match(page, "select[name='denomComune']", comune)
+    if comune_value:
+        await page.locator("select[name='denomComune']").select_option(comune_value)
+
+    await _select_sezione(page, comune, sezione)
+
+    if sezione_urbana:
+        sez_urb = page.locator("input[name='sezUrb']")
+        if await sez_urb.count() > 0:
+            await sez_urb.fill(str(sezione_urbana).upper())
+
+    await page.locator("input[name='foglio']").fill(str(foglio))
+    await page.locator("input[name='particella1']").fill(str(particella))
+    if subalterno:
+        await page.locator("input[name='subalterno1']").fill(str(subalterno))
+
+    await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
+
+    await page.locator("input[name='scelta'][value='Ricerca']").click()
+    await page.wait_for_load_state("networkidle", timeout=30000)
+
+    # Handle "Conferma Assenza Subalterno" if it appears
+    try:
+        conferma = page.locator("input[name='confAssSub'][value='Conferma']")
+        if await conferma.count() > 0:
+            await conferma.click()
+            await page.wait_for_load_state("networkidle", timeout=30000)
+    except Exception:
+        pass
+
+    radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+    count = await radio_buttons.count()
+    log.info("Lista immobili ripristinata: %d radio buttons", count)
+    return radio_buttons
+
+
 async def _navigate_back_to_immobili_list(page):
     """Navigate back to the immobili list (AssenzaSubalterno.do) from any sub-page.
 
-    Handles various "Indietro" / "Back" buttons with different names:
-      - input[name='indietro'] — standard back button
-      - input[name='annullaConf'] — back from InoltraRichiestaVis.do confirmation
-      - form action pointing to AssenzaSubalterno.do
+    Stops as soon as the page has radio buttons (visImmSel) — that's the immobili list.
     """
     for _attempt in range(5):
-        if "AssenzaSubalterno" in page.url or "SceltaVisuraImmSogg" in page.url:
-            break
+        # Check if we're on the immobili list by looking for radio buttons
+        radios = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+        if await radios.count() > 0:
+            log.debug("Tornati alla lista immobili (%d radio) — %s", await radios.count(), page.url)
+            return
 
-        # Try all known back button selectors
-        back_btn = page.locator(
-            "input[name='indietro'][value='Indietro'], "
-            "input[name='annullaConf'][value='Indietro'], "
-            "form[action*='AssenzaSubalterno'] input[type='submit']"
-        )
+        current = page.url
+
+        # Try the annullaConf button first (specific to InoltraRichiestaVis.do)
+        annulla_btn = page.locator("input[name='annullaConf'][value='Indietro']")
+        if await annulla_btn.count() > 0:
+            log.debug("Cliccando annullaConf Indietro da %s", current)
+            await annulla_btn.click()
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            continue
+
+        # Try standard Indietro from IndietroVisImmSogg (intestati page back)
+        indietro_vis = page.locator("form[action*='IndietroVisImmSogg'] input[type='submit']")
+        if await indietro_vis.count() > 0:
+            log.debug("Cliccando IndietroVisImmSogg da %s", current)
+            await indietro_vis.click()
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            continue
+
+        # Generic Indietro — but NOT the one that goes to IndietroDatiImm (search form)
+        back_btn = page.locator("input[name='indietro'][value='Indietro']")
         if await back_btn.count() > 0:
+            # Check if this Indietro leads to the search form — don't click it
+            parent_form = page.locator("form[action*='IndietroDatiImm'] input[name='indietro']")
+            if await parent_form.count() > 0:
+                log.debug("Indietro verso search form (IndietroDatiImm) — non cliccare, siamo sulla lista")
+                return
+            log.debug("Cliccando Indietro generico da %s", current)
             await back_btn.first.click()
-            await page.wait_for_load_state("networkidle", timeout=30000)
-        else:
-            log.warning("Nessun bottone Indietro trovato su %s", page.url)
-            break
+            await page.wait_for_load_state("networkidle", timeout=15000)
+            continue
+
+        log.warning("Nessun bottone Indietro trovato su %s", current)
+        break
+
+    log.warning("Navigazione indietro completata — URL corrente: %s", page.url)
 
 
 async def _set_visura_form_defaults(page):
     """Set default options on the SceltaVisuraImmSogg form.
 
     Defaults:
+      - Con intestati: selected (required for XML format)
       - Storica: Analitica (tipoVisura=3)
       - Formato documento: XML (tipoDocFornitura=XML)
       - richiesta in differita: checked (differita=1)
+
+    Uses JS evaluate for radio buttons that may be hidden by SISTER's
+    dynamic form logic (XML option is only visible with certain combinations).
     """
-    # Storica → Analitica (value=3)
-    analitica_radio = page.locator("input[name='tipoVisura'][value='3']")
-    if await analitica_radio.count() > 0:
-        await analitica_radio.click()
-        log.info("Tipo visura: Storica Analitica")
+    await page.evaluate("""() => {
+        // Select "Con intestati" first (required for XML format to be visible)
+        const conIntestati = document.querySelector('input[name="intestati"][value="1"]');
+        if (conIntestati && !conIntestati.checked) {
+            conIntestati.click();
+        }
 
-    # Formato documento → XML
-    xml_radio = page.locator("input[name='tipoDocFornitura'][value='XML']")
-    if await xml_radio.count() > 0:
-        await xml_radio.click()
-        log.info("Formato documento: XML")
+        // Storica → Analitica (value=3)
+        const analitica = document.querySelector('input[name="tipoVisura"][value="3"]');
+        if (analitica) {
+            analitica.click();
+        }
 
-    # richiesta in differita → checked
-    differita_cb = page.locator("input[name='differita']")
-    if await differita_cb.count() > 0 and not await differita_cb.is_checked():
-        await differita_cb.click()
-        log.info("Richiesta in differita: selezionata")
+        // Trigger the JS that shows/hides format options
+        if (typeof checkPdfXml === 'function') checkPdfXml(true);
+        if (typeof tipoVisuradisplayPdf === 'function' && analitica) tipoVisuradisplayPdf(analitica.value);
+
+        // Formato documento → XML
+        const xml = document.querySelector('input[name="tipoDocFornitura"][value="XML"]');
+        if (xml) {
+            xml.parentElement.style.display = '';
+            xml.checked = true;
+        }
+
+        // richiesta in differita → checked
+        const differita = document.querySelector('input[name="differita"]');
+        if (differita && !differita.checked) {
+            differita.checked = true;
+        }
+    }""")
+    log.info("Form defaults: Con intestati, Storica Analitica, XML, Differita")
 
 
 async def _download_richieste_documents(page, page_logger) -> list[dict]:
@@ -915,7 +1076,11 @@ async def _download_richieste_documents(page, page_logger) -> list[dict]:
                     "parsed_data": None,
                 }
 
-                # Parse XML content
+                # Extract P7M and parse XML content
+                if file_format == "P7M":
+                    extracted_path = _extract_p7m(save_path)
+                    if extracted_path:
+                        doc_info["extracted_path"] = extracted_path
                 if file_format in ("XML", "P7M"):
                     parsed = _parse_visura_xml(save_path)
                     if parsed:
@@ -923,6 +1088,15 @@ async def _download_richieste_documents(page, page_logger) -> list[dict]:
                         log.info("XML parsed: %s — %d intestati, %s",
                                  parsed.get("tipo", ""), len(parsed.get("intestati", [])),
                                  f"F.{parsed.get('foglio')} P.{parsed.get('particella')}")
+                        # Rename extracted file to descriptive name
+                        desc_name = _descriptive_filename(parsed)
+                        if desc_name and doc_info.get("extracted_path"):
+                            ext = ".xml" if "xml" in (open(doc_info["extracted_path"], "rb").read(20).decode(errors="ignore").lower()) else ".dat"
+                            new_path = os.path.join(docs_dir, desc_name + ext)
+                            if new_path != doc_info["extracted_path"] and not os.path.exists(new_path):
+                                os.rename(doc_info["extracted_path"], new_path)
+                                doc_info["extracted_path"] = new_path
+                                log.info("File rinominato: %s", desc_name + ext)
 
                 downloaded.append(doc_info)
 
@@ -939,32 +1113,74 @@ async def _download_richieste_documents(page, page_logger) -> list[dict]:
     return downloaded
 
 
+def _descriptive_filename(parsed: dict) -> str:
+    """Build a descriptive filename from parsed visura XML data."""
+    tipo = parsed.get("tipo", "visura").replace("visura_", "")
+    prov = parsed.get("provincia", "")
+    comune = parsed.get("comune", "").strip()
+    fog = parsed.get("foglio", "")
+    par = parsed.get("particella", "")
+    sub = parsed.get("subalterno", "")
+    sez = parsed.get("sezione_urbana", "")
+
+    intestato = ""
+    if parsed.get("intestati"):
+        first = parsed["intestati"][0]
+        intestato = first.get("Nominativo", first.get("CF", ""))
+        intestato = intestato.split(";")[0].strip()[:40]
+
+    name = f"{tipo}_{prov}_{comune}_F{fog}_P{par}"
+    if sub:
+        name += f"_Sub{sub}"
+    if sez:
+        name += f"_Sez{sez}"
+    if intestato:
+        name += f"_{intestato}"
+    return re.sub(r"[^\w\-.]", "_", name)
+
+
+def _extract_p7m(file_path: str) -> str | None:
+    """Extract the signed content from a P7M file using openssl.
+
+    Returns the path to the extracted file, or None on failure.
+    After extraction, renames the output to a descriptive filename based on content.
+    """
+    import subprocess
+    out_path = file_path.rsplit(".p7m", 1)[0]
+    if not out_path or out_path == file_path:
+        out_path = file_path + ".extracted"
+    try:
+        result = subprocess.run(
+            ["openssl", "cms", "-verify", "-inform", "DER", "-in", file_path, "-noverify", "-out", out_path],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            log.info("P7M estratto: %s → %s (%d bytes)", file_path, out_path, os.path.getsize(out_path))
+            return out_path
+        log.warning("openssl cms fallito (rc=%d): %s", result.returncode, result.stderr.decode(errors="ignore")[:200])
+    except Exception as e:
+        log.warning("Errore estrazione P7M %s: %s", file_path, e)
+    return None
+
+
 def _parse_visura_xml(file_path: str) -> dict | None:
     """Parse a SISTER visura XML file and extract structured data.
 
     Handles both plain .xml and .p7m (signed XML) files.
+    P7M files are first extracted via openssl cms.
     """
     try:
-        content = open(file_path, "r", encoding="utf-8", errors="ignore").read()
+        xml_path = file_path
 
-        # P7M files have a binary signature wrapper — extract the XML portion
-        if file_path.endswith(".p7m"):
-            xml_start = content.find("<?xml")
-            if xml_start == -1:
-                xml_start = content.find("<Visura")
-            if xml_start == -1:
-                # Try reading as binary and finding XML
-                raw = open(file_path, "rb").read()
-                xml_start = raw.find(b"<?xml")
-                if xml_start == -1:
-                    xml_start = raw.find(b"<Visura")
-                if xml_start >= 0:
-                    content = raw[xml_start:].decode("utf-8", errors="ignore")
-                else:
-                    log.warning("Nessun XML trovato in P7M: %s", file_path)
-                    return None
+        # P7M: extract signed content via openssl
+        if file_path.lower().endswith(".p7m"):
+            extracted = _extract_p7m(file_path)
+            if extracted:
+                xml_path = extracted
             else:
-                content = content[xml_start:]
+                log.warning("Fallback: tentativo parsing diretto P7M %s", file_path)
+
+        content = open(xml_path, "r", encoding="utf-8", errors="ignore").read()
 
         soup = BeautifulSoup(content, "xml")
         if not soup.find():
@@ -981,43 +1197,85 @@ def _parse_visura_xml(file_path: str) -> dict | None:
             "tipo_catasto": "",
             "intestati": [],
             "immobile": {},
-            "xml_content": content[:50000],  # store up to 50KB of raw XML
+            "classamento": [],
+            "indirizzo": "",
+            "xml_content": content[:50000],
         }
 
-        # Try standard SISTER XML tags
-        for tag_name, key in [
-            ("Provincia", "provincia"), ("Comune", "comune"),
-            ("Foglio", "foglio"), ("Particella", "particella"),
-            ("Subalterno", "subalterno"), ("SezioneUrbana", "sezione_urbana"),
-            ("TipoCatasto", "tipo_catasto"),
-        ]:
-            el = soup.find(tag_name) or soup.find(tag_name.lower())
-            if el and el.string:
-                result[key] = el.string.strip()
+        # Determine document type
+        if soup.find("VisuraFabbricatiStorica") or soup.find("VisuraFabbricati"):
+            result["tipo"] = "visura_fabbricati"
+            result["tipo_catasto"] = "F"
+        elif soup.find("VisuraTerrenoStorica") or soup.find("VisuraTerreno"):
+            result["tipo"] = "visura_terreni"
+            result["tipo_catasto"] = "T"
+        elif soup.find("VisuraSoggetto") or soup.find("VisuraSoggettoStorica"):
+            result["tipo"] = "visura_soggetto"
+        else:
+            result["tipo"] = "visura"
 
-        # Extract intestati
-        for intestato_el in soup.find_all("Intestato") or soup.find_all("intestato") or []:
-            intestato = {}
+        # Extract property identifiers from DatiRichiesta attributes
+        dati_rich = soup.find("DatiRichiesta")
+        if dati_rich:
+            result["provincia"] = dati_rich.get("Provincia", "")
+            result["comune"] = dati_rich.get("Comune", "")
+            result["foglio"] = dati_rich.get("Foglio", "")
+            result["particella"] = dati_rich.get("ParticellaNum", "") or dati_rich.get("Particella", "")
+            result["subalterno"] = dati_rich.get("Subalterno", "")
+            result["sezione_urbana"] = dati_rich.get("SezUrbana", "")
+
+        # Extract immobile data from IdentificativoDefinitivo + DatiClassamento
+        for id_def in soup.find_all("IdentificativoDefinitivo"):
+            attrs = dict(id_def.attrs)
+            if attrs.get("Foglio") and not result["foglio"]:
+                result["foglio"] = attrs.get("Foglio", "")
+                result["particella"] = attrs.get("ParticellaNum", "") or attrs.get("Particella", "")
+                result["subalterno"] = attrs.get("Subalterno", "")
+                result["sezione_urbana"] = attrs.get("SezUrbana", "")
+            partita_el = id_def.find("Partita")
+            if partita_el and partita_el.string:
+                attrs["Partita"] = partita_el.string.strip()
+            if attrs.get("Foglio"):
+                result["immobile"] = attrs
+                break
+
+        # Extract classamento (Fabbricati)
+        for class_el in soup.find_all("DatiClassamentoF"):
+            entry = dict(class_el.attrs)
+            partita_el = class_el.find("Partita")
+            if partita_el and partita_el.string:
+                entry["Partita"] = partita_el.string.strip()
+            result["classamento"].append(entry)
+
+        # Extract classamento (Terreni)
+        for class_el in soup.find_all("DatiClassamentoT"):
+            result["classamento"].append(dict(class_el.attrs))
+
+        # Extract indirizzo
+        indirizzo_el = soup.find("IndirizzoImm")
+        if indirizzo_el and indirizzo_el.string:
+            result["indirizzo"] = indirizzo_el.string.strip()
+
+        # Extract intestati from Intestato elements (attributes + children)
+        for intestato_el in soup.find_all("Intestato"):
+            intestato = dict(intestato_el.attrs)
             for child in intestato_el.children:
-                if hasattr(child, "name") and child.name and child.string:
-                    intestato[child.name] = child.string.strip()
+                if hasattr(child, "name") and child.name:
+                    if child.string:
+                        intestato[child.name] = child.string.strip()
+                    elif child.attrs:
+                        intestato[child.name] = dict(child.attrs)
             if intestato:
                 result["intestati"].append(intestato)
 
-        # Extract immobile data
-        immobile_el = soup.find("Immobile") or soup.find("immobile") or soup.find("DatiImmobile")
-        if immobile_el:
-            for child in immobile_el.children:
+        # Also check IntestazioneAttuale for Soggetto elements
+        for sogg_el in soup.find_all("Soggetto"):
+            sogg = dict(sogg_el.attrs)
+            for child in sogg_el.children:
                 if hasattr(child, "name") and child.name and child.string:
-                    result["immobile"][child.name] = child.string.strip()
-
-        # Determine document type from content
-        if soup.find("VisuraSoggetto") or soup.find("visuraSoggetto"):
-            result["tipo"] = "visura_soggetto"
-        elif soup.find("VisuraImmobile") or soup.find("visuraImmobile"):
-            result["tipo"] = "visura_immobile"
-        else:
-            result["tipo"] = "visura"
+                    sogg[child.name] = child.string.strip()
+            if sogg:
+                result["intestati"].append(sogg)
 
         return result
 
@@ -1027,17 +1285,36 @@ def _parse_visura_xml(file_path: str) -> dict | None:
 
 
 async def _save_documents_to_db(documents: list[dict]) -> None:
-    """Persist downloaded documents to the visura_documents table."""
+    """Persist downloaded documents to the visura_documents table, skipping duplicates."""
     import json
+    from sqlalchemy import text
     from .database import _get_session_factory
     from .db_models import VisuraDocumentDB
 
     session_factory = _get_session_factory()
+    saved = 0
+    skipped = 0
     async with session_factory() as session:
         for doc in documents:
             parsed = doc.get("parsed_data") or {}
+            foglio = parsed.get("foglio", "")
+            particella = parsed.get("particella", "")
+            subalterno = parsed.get("subalterno", "")
+            doc_type = parsed.get("tipo", "")
+
+            # Skip if duplicate exists (same property + document type)
+            if foglio and particella:
+                existing = await session.execute(text(
+                    "SELECT id FROM visura_documents "
+                    "WHERE foglio = :f AND particella = :p AND subalterno = :s AND document_type = :t LIMIT 1"
+                ), {"f": foglio, "p": particella, "s": subalterno, "t": doc_type})
+                if existing.fetchone():
+                    log.debug("Documento duplicato saltato: %s F.%s P.%s Sub.%s", doc_type, foglio, particella, subalterno)
+                    skipped += 1
+                    continue
+
             row = VisuraDocumentDB(
-                document_type=parsed.get("tipo", ""),
+                document_type=doc_type,
                 file_format=doc.get("file_format", ""),
                 filename=doc.get("filename", ""),
                 file_path=doc.get("path"),
@@ -1046,18 +1323,23 @@ async def _save_documents_to_db(documents: list[dict]) -> None:
                 richiesta_del=doc.get("richiesta_del"),
                 provincia=parsed.get("provincia"),
                 comune=parsed.get("comune"),
-                foglio=parsed.get("foglio"),
-                particella=parsed.get("particella"),
-                subalterno=parsed.get("subalterno"),
+                foglio=foglio,
+                particella=particella,
+                subalterno=subalterno,
                 sezione_urbana=parsed.get("sezione_urbana"),
                 tipo_catasto=parsed.get("tipo_catasto"),
                 intestati_json=json.dumps(parsed.get("intestati", []), ensure_ascii=False) if parsed.get("intestati") else None,
-                dati_immobile_json=json.dumps(parsed.get("immobile", {}), ensure_ascii=False) if parsed.get("immobile") else None,
+                dati_immobile_json=json.dumps({
+                    "immobile": parsed.get("immobile", {}),
+                    "classamento": parsed.get("classamento", []),
+                    "indirizzo": parsed.get("indirizzo", ""),
+                }, ensure_ascii=False) if parsed.get("immobile") or parsed.get("classamento") else None,
                 xml_content=parsed.get("xml_content"),
             )
             session.add(row)
+            saved += 1
         await session.commit()
-    log.info("Salvati %d documenti nel database", len(documents))
+    log.info("Documenti: %d salvati, %d duplicati saltati", saved, skipped)
 
 
 async def _find_intestati_button(page):

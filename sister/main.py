@@ -136,13 +136,24 @@ async def lifespan(app: FastAPI):
     await init_db()
     PageLogger.reset_session()
     visura_service = VisuraService()
-    await visura_service.initialize()
-    logger.info("Servizio visure avviato")
-    yield
-    logger.info("Shutdown in corso, eseguendo logout...")
-    if visura_service:
-        await visura_service.graceful_shutdown()
-    logger.info("Servizio visure fermato con graceful shutdown")
+    await visura_service.initialize(background_auth=True)
+    logger.info("Servizio visure avviato (autenticazione in background)")
+
+    try:
+        yield
+    finally:
+        logger.info("Shutdown in corso, eseguendo logout...")
+        if visura_service:
+            try:
+                await visura_service.graceful_shutdown()
+            except Exception as e:
+                logger.error("Errore durante graceful shutdown: %s", e)
+                # Last resort: try to close browser directly
+                try:
+                    await visura_service.browser_manager.close()
+                except Exception:
+                    pass
+        logger.info("Servizio visure fermato con graceful shutdown")
 
 
 # ---------------------------------------------------------------------------

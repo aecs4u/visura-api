@@ -9,6 +9,7 @@
 
   const POLL_INTERVAL = 3000;  // ms
   const POLL_TIMEOUT = 120000;  // ms
+  const _abortControllers = {};  // groupId → AbortController
 
   // CSV placeholder templates per query type
   const BATCH_CSV_TEMPLATES = {
@@ -45,6 +46,31 @@
       textarea.value = '';
       textarea.placeholder = template;
     }
+  }
+
+  document.querySelectorAll('.btn-stop-execution').forEach(btn => {
+    btn.addEventListener('click', function () {
+      const groupId = this.dataset.formGroup;
+      const ac = _abortControllers[groupId];
+      if (ac) {
+        ac.abort();
+        delete _abortControllers[groupId];
+      }
+      this.classList.add('d-none');
+      var statusDiv = document.getElementById('response-status-' + groupId);
+      if (statusDiv) {
+        statusDiv.innerHTML = '<div class="alert alert-warning"><i class="fas fa-stop me-2"></i>Execution stopped by user.</div>';
+      }
+    });
+  });
+
+  function _showStopButton(groupId) {
+    var btn = document.querySelector('.btn-stop-execution[data-form-group="' + groupId + '"]');
+    if (btn) btn.classList.remove('d-none');
+  }
+  function _hideStopButton(groupId) {
+    var btn = document.querySelector('.btn-stop-execution[data-form-group="' + groupId + '"]');
+    if (btn) btn.classList.add('d-none');
   }
 
   document.querySelectorAll('.btn-copy-response').forEach(btn => {
@@ -132,13 +158,20 @@
     var pvContainer = document.getElementById('page-visits-' + groupId);
     if (pvContainer) pvContainer.innerHTML = '';
 
+    // Create AbortController for this execution
+    if (_abortControllers[groupId]) _abortControllers[groupId].abort();
+    var ac = new AbortController();
+    _abortControllers[groupId] = ac;
+    _showStopButton(groupId);
+
     // --- Workflow SSE streaming ---
     if (path === '/visura/workflow') {
       try {
         await handleWorkflowStream(groupId, body, statusDiv, contentDiv);
       } catch (err) {
-        statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + err.message + '</div>';
+        if (err.name !== 'AbortError') statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + err.message + '</div>';
       }
+      _hideStopButton(groupId);
       return;
     }
 
@@ -148,6 +181,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: ac.signal,
       });
 
       const data = await res.json();
@@ -190,7 +224,7 @@
       // Poll each request_id
       const allResults = {};
       for (const rid of requestIds) {
-        const result = await pollForResult(rid, statusDiv);
+        const result = await pollForResult(rid, statusDiv, ac.signal);
         allResults[rid] = result;
       }
 
@@ -203,16 +237,17 @@
       renderPageVisits(groupId, allResults);
 
     } catch (err) {
-      statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + err.message + '</div>';
+      if (err.name !== 'AbortError') statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + err.message + '</div>';
     }
+    _hideStopButton(groupId);
   }
 
-  async function pollForResult(requestId, statusDiv) {
+  async function pollForResult(requestId, statusDiv, signal) {
     const start = Date.now();
 
     while (true) {
       try {
-        const res = await fetch('/web/api/visura/' + requestId);
+        const res = await fetch('/web/api/visura/' + requestId, { signal: signal });
         const data = await res.json();
 
         if (data.status === 'completed' || data.status === 'error' || data.status === 'expired') {

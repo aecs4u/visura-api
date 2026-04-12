@@ -395,6 +395,81 @@ async def get_result_record(request_id: str) -> Optional[dict]:
         }
 
 
+async def get_documents_for_response(request_id: str, foglio: str = None, particella: str = None) -> list[dict]:
+    """Fetch visura_documents linked to a response_id OR matching foglio/particella."""
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        # Match by response_id OR by property identifiers
+        conditions = [VisuraDocumentDB.response_id == request_id]
+        if foglio and particella:
+            conditions.append(
+                (VisuraDocumentDB.foglio == foglio) & (VisuraDocumentDB.particella == particella)
+            )
+        from sqlalchemy import or_
+        stmt = select(VisuraDocumentDB).where(or_(*conditions)).order_by(VisuraDocumentDB.created_at.desc())
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+    docs = []
+    for row in rows:
+        doc = {
+            "id": row.id,
+            "document_type": row.document_type,
+            "file_format": row.file_format,
+            "filename": row.filename,
+            "file_path": row.file_path,
+            "file_size": row.file_size,
+            "oggetto": row.oggetto,
+            "richiesta_del": row.richiesta_del,
+            "provincia": row.provincia,
+            "comune": row.comune,
+            "foglio": row.foglio,
+            "particella": row.particella,
+            "subalterno": row.subalterno,
+            "sezione_urbana": row.sezione_urbana,
+            "tipo_catasto": row.tipo_catasto,
+            "intestati": json.loads(row.intestati_json) if row.intestati_json else [],
+            "dati_immobile": _dati.get("immobile", {}) if (_dati := json.loads(row.dati_immobile_json) if row.dati_immobile_json else {}) else {},
+            "classamento": _dati.get("classamento", []),
+            "indirizzo": _dati.get("indirizzo", ""),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        docs.append(doc)
+    return docs
+
+
+async def get_all_documents(limit: int = 100, offset: int = 0) -> list[dict]:
+    """Fetch all visura_documents (for browse page)."""
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        stmt = (
+            select(VisuraDocumentDB)
+            .order_by(VisuraDocumentDB.created_at.desc())
+            .limit(limit).offset(offset)
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+    docs = []
+    for row in rows:
+        docs.append({
+            "id": row.id,
+            "document_type": row.document_type,
+            "file_format": row.file_format,
+            "filename": row.filename,
+            "file_size": row.file_size,
+            "oggetto": row.oggetto,
+            "richiesta_del": row.richiesta_del,
+            "provincia": row.provincia,
+            "comune": row.comune,
+            "foglio": row.foglio,
+            "particella": row.particella,
+            "subalterno": row.subalterno,
+            "tipo_catasto": row.tipo_catasto,
+            "intestati_count": len(json.loads(row.intestati_json)) if row.intestati_json else 0,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        })
+    return docs
+
+
 # ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------

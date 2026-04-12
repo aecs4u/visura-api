@@ -173,6 +173,17 @@ async def richiedi_intestati_immobile(request: VisuraIntestatiInput, service: Vi
 
         result = await service.add_intestati_request(intestati_request, force=force)
 
+        if hasattr(result, "cached") and result.cached and result.response:
+            resp = result.response
+            return JSONResponse({
+                "request_id": result.request_id,
+                "tipo_catasto": tipo_catasto,
+                "status": "completed" if resp.success else "error",
+                "data": resp.data,
+                "error": resp.error,
+                "timestamp": resp.timestamp.isoformat() if resp.timestamp else None,
+            })
+
         return JSONResponse(
             {
                 "request_id": request_id,
@@ -201,6 +212,7 @@ async def health_check(service: VisuraService):
     return JSONResponse(
         {
             "status": "healthy",
+            "auth_ready": service.auth_ready,
             "authenticated": service.browser_manager.authenticated,
             "queue_size": service.request_queue.qsize(),
             "pending_requests": len(service.pending_request_ids),

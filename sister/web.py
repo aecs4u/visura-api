@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
 
-from .database import count_responses, find_responses, get_result_record
+from .database import count_responses, find_responses, get_documents_for_response, get_result_record
 from .form_config import get_available_form_groups, get_single_step_groups, get_workflow_groups
 
 logger = logging.getLogger("sister")
@@ -260,6 +260,9 @@ async def web_result_detail(request: Request, request_id: str, user=Depends(_req
     result["requested_at_display"] = _format_timestamp(result.get("requested_at"))
     result["responded_at_display"] = _format_timestamp(result.get("responded_at"))
     result["sections"] = _build_result_sections(result.get("data"))
+    result["documents"] = await get_documents_for_response(
+        request_id, foglio=result.get("foglio"), particella=result.get("particella"),
+    )
     return theme.render(
         "sister/result_detail.html", request, user=user,
         result=result, request_id=request_id, not_found=False,
