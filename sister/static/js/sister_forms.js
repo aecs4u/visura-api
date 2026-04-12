@@ -59,6 +59,25 @@
     });
   });
 
+  document.querySelectorAll('.btn-export-response').forEach(btn => {
+    btn.addEventListener('click', function () {
+      const groupId = this.dataset.formGroup;
+      const content = document.getElementById('response-content-' + groupId);
+      if (!content || !content.textContent.trim()) return;
+      const blob = new Blob([content.textContent], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = groupId + '_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      this.innerHTML = '<i class="fas fa-check me-1"></i>Exported';
+      setTimeout(() => { this.innerHTML = '<i class="fas fa-download me-1"></i>Export'; }, 2000);
+    });
+  });
+
   async function handleFormSubmit(e) {
     e.preventDefault();
     const form = e.target;
@@ -110,6 +129,18 @@
     responseDiv.style.display = 'block';
     statusDiv.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin me-2"></i>Submitting request...</div>';
     contentDiv.textContent = '';
+    var pvContainer = document.getElementById('page-visits-' + groupId);
+    if (pvContainer) pvContainer.innerHTML = '';
+
+    // --- Workflow SSE streaming ---
+    if (path === '/visura/workflow') {
+      try {
+        await handleWorkflowStream(groupId, body, statusDiv, contentDiv);
+      } catch (err) {
+        statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + err.message + '</div>';
+      }
+      return;
+    }
 
     try {
       // POST to proxy
@@ -138,57 +169,11 @@
         return;
       }
 
-      // Check for workflow response (has steps array and summary)
-      if (data.preset && data.steps) {
-        const summary = data.summary || {};
-        const completed = summary.completed || 0;
-        const failed = summary.failed || 0;
-        const skipped = summary.skipped || 0;
-        const discovered = summary.discovered_properties || 0;
-        const alertClass = failed > 0 ? 'alert-warning' : 'alert-success';
-        const icon = failed > 0 ? 'fa-exclamation-triangle' : 'fa-check-circle';
-
-        let html = '<div class="alert ' + alertClass + '"><i class="fas ' + icon + ' me-2"></i>';
-        html += '<strong>Workflow: ' + data.preset + '</strong> — ';
-        html += completed + ' completed, ' + failed + ' failed, ' + skipped + ' skipped';
-        const props = summary.properties || 0;
-        const owners = summary.owners || 0;
-        const risks = summary.risk_flags || 0;
-        if (props > 0 || owners > 0) html += ' | ' + props + ' properties, ' + owners + ' owners';
-        if (risks > 0) html += ' | <span class="text-warning">' + risks + ' risk flag(s)</span>';
-        html += '</div>';
-
-        // Render step-by-step results
-        html += '<div class="list-group mb-3">';
-        for (const step of data.steps) {
-          const badge = step.status === 'completed' ? 'bg-success' : (step.status === 'error' ? 'bg-danger' : 'bg-secondary');
-          html += '<div class="list-group-item">';
-          html += '<span class="badge ' + badge + ' me-2">' + step.status + '</span>';
-          html += '<strong>' + step.step + '</strong>';
-          if (step.error) html += ' <span class="text-danger ms-2">' + step.error + '</span>';
-          if (step.data) {
-            const d = step.data;
-            const counts = [];
-            for (const key of ['immobili', 'intestati', 'risultati', 'drill_results']) {
-              if (d[key] && Array.isArray(d[key])) counts.push(key + ': ' + d[key].length);
-            }
-            if (d.total !== undefined) counts.push('total: ' + d.total);
-            if (d.truncated) counts.push('(truncated)');
-            if (counts.length) html += ' <span class="text-muted ms-2">' + counts.join(', ') + '</span>';
-          }
-          html += '</div>';
-        }
-        html += '</div>';
-
-        statusDiv.innerHTML = html;
-        contentDiv.textContent = JSON.stringify(data, null, 2);
-        return;
-      }
-
       // Check for cached results
       if (data.status === 'cached' && data.cached_results) {
         statusDiv.innerHTML = '<div class="alert alert-success"><i class="fas fa-bolt me-2"></i>Cached result returned instantly!</div>';
         contentDiv.textContent = JSON.stringify(data, null, 2);
+        renderPageVisits(groupId, data);
         return;
       }
 
@@ -215,6 +200,7 @@
       const icon = allCompleted ? 'fa-check-circle' : 'fa-exclamation-triangle';
       statusDiv.innerHTML = '<div class="alert ' + alertClass + '"><i class="fas ' + icon + ' me-2"></i>Done. ' + requestIds.length + ' result(s).</div>';
       contentDiv.textContent = JSON.stringify(allResults, null, 2);
+      renderPageVisits(groupId, allResults);
 
     } catch (err) {
       statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + err.message + '</div>';
@@ -246,6 +232,354 @@
         return { status: 'error', error: err.message };
       }
     }
+  }
+
+  // --- Workflow SSE streaming handler ---
+
+  async function handleWorkflowStream(groupId, body, statusDiv, contentDiv) {
+    const pvContainer = document.getElementById('page-visits-' + groupId);
+    const accId = 'wf-steps-' + groupId;
+    let stepIndex = 0;
+    let allSteps = [];
+    let finalData = null;
+
+    // Initialise the accordion container
+    if (pvContainer) pvContainer.innerHTML = '<div class="accordion" id="' + accId + '"></div>';
+
+    const res = await fetch('/web/api/workflow/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(function() { return { detail: res.statusText }; });
+      throw new Error(err.detail || res.statusText);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete SSE messages
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop() || '';
+
+      for (const block of lines) {
+        const dataLine = block.trim();
+        if (!dataLine.startsWith('data: ')) continue;
+        const jsonStr = dataLine.substring(6);
+        let evt;
+        try { evt = JSON.parse(jsonStr); } catch (e) { continue; }
+
+        if (evt.event === 'start') {
+          statusDiv.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin me-2"></i>'
+            + '<strong>Workflow: ' + (evt.preset || '') + '</strong> — '
+            + (evt.planned_steps ? evt.planned_steps.length + ' steps planned' : 'starting...')
+            + '</div>';
+        } else if (evt.event === 'step') {
+          _renderStepAccordion(accId, groupId, evt, stepIndex);
+          stepIndex++;
+          allSteps.push(evt);
+
+          // Update status bar counts
+          const completed = allSteps.filter(function(s) { return s.status === 'completed'; }).length;
+          const running = allSteps.filter(function(s) { return s.status === 'running'; }).length;
+          const failed = allSteps.filter(function(s) { return s.status === 'error'; }).length;
+          const skipped = allSteps.filter(function(s) { return s.status === 'skipped'; }).length;
+          let parts = [];
+          if (completed) parts.push(completed + ' completed');
+          if (running) parts.push(running + ' running');
+          if (failed) parts.push(failed + ' failed');
+          if (skipped) parts.push(skipped + ' skipped');
+          statusDiv.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin me-2"></i>'
+            + '<strong>Workflow</strong> — ' + parts.join(', ')
+            + '</div>';
+        } else if (evt.event === 'done') {
+          finalData = evt;
+          const s = evt.summary || {};
+          const alertClass = (s.failed || 0) > 0 ? 'alert-warning' : 'alert-success';
+          const icon = (s.failed || 0) > 0 ? 'fa-exclamation-triangle' : 'fa-check-circle';
+          let html = '<div class="alert ' + alertClass + '"><i class="fas ' + icon + ' me-2"></i>';
+          html += '<strong>Workflow: ' + (evt.preset || '') + '</strong> — ';
+          html += (s.completed || 0) + ' completed, ' + (s.failed || 0) + ' failed, ' + (s.skipped || 0) + ' skipped';
+          if ((s.properties || 0) > 0 || (s.owners || 0) > 0) html += ' | ' + (s.properties || 0) + ' properties, ' + (s.owners || 0) + ' owners';
+          if ((s.risk_flags || 0) > 0) html += ' | <span class="text-warning">' + (s.risk_flags || 0) + ' risk flag(s)</span>';
+          html += '</div>';
+          statusDiv.innerHTML = html;
+          contentDiv.textContent = JSON.stringify(evt, null, 2);
+        } else if (evt.event === 'error') {
+          statusDiv.innerHTML = '<div class="alert alert-danger"><i class="fas fa-times-circle me-2"></i>' + (evt.error || 'Unknown error') + '</div>';
+        }
+      }
+    }
+  }
+
+  function _renderStepAccordion(accId, groupId, step, idx) {
+    const accordion = document.querySelector('#' + accId);
+    if (!accordion) return;
+
+    const collapseId = accId + '-step-' + idx;
+    const badgeClass = step.status === 'completed' ? 'bg-success'
+      : step.status === 'error' ? 'bg-danger'
+      : step.status === 'running' ? 'bg-primary'
+      : 'bg-secondary';
+
+    // If this is a "running" update for a step we already have, update its badge
+    const existing = document.getElementById('step-header-' + accId + '-' + step.step);
+    if (existing) {
+      // Update from running → completed/error
+      const badge = existing.querySelector('.badge');
+      if (badge) {
+        badge.className = 'badge ' + badgeClass + ' me-2';
+        badge.textContent = step.status;
+      }
+      // Update body content
+      const body = document.getElementById(collapseId + '-body');
+      if (body && step.status !== 'running') {
+        body.innerHTML = _buildStepBody(step);
+      }
+      return;
+    }
+
+    // Build counts summary
+    let countsHtml = '';
+    if (step.data) {
+      const counts = [];
+      for (const key of ['immobili', 'intestati', 'risultati', 'drill_results', 'owner_entities']) {
+        if (step.data[key] && Array.isArray(step.data[key])) counts.push(key + ': ' + step.data[key].length);
+      }
+      if (step.data.total !== undefined) counts.push('total: ' + step.data.total);
+      if (step.reason) counts.push(step.reason);
+      if (step.error) counts.push(step.error);
+      if (counts.length) countsHtml = '<span class="text-muted ms-2 small">' + counts.join(', ') + '</span>';
+    } else if (step.reason) {
+      countsHtml = '<span class="text-muted ms-2 small">' + step.reason + '</span>';
+    } else if (step.error) {
+      countsHtml = '<span class="text-danger ms-2 small">' + step.error + '</span>';
+    }
+
+    const isRunning = step.status === 'running';
+    let html = '<div class="accordion-item" id="step-item-' + collapseId + '">';
+    html += '<h2 class="accordion-header" id="step-header-' + accId + '-' + step.step + '">';
+    html += '<button class="accordion-button collapsed py-2" type="button" data-bs-toggle="collapse" data-bs-target="#' + collapseId + '">';
+    html += '<span class="badge ' + badgeClass + ' me-2">' + step.status + '</span>';
+    if (isRunning) html += '<span class="spinner-border spinner-border-sm me-2" role="status"></span>';
+    html += '<strong>' + step.step + '</strong>';
+    html += countsHtml;
+    html += '</button></h2>';
+    html += '<div id="' + collapseId + '" class="accordion-collapse collapse">';
+    html += '<div class="accordion-body p-2" id="' + collapseId + '-body">';
+    if (!isRunning) {
+      html += _buildStepBody(step);
+    } else {
+      html += '<div class="text-center py-3"><span class="spinner-border spinner-border-sm me-2"></span>Running...</div>';
+    }
+    html += '</div></div></div>';
+
+    accordion.insertAdjacentHTML('beforeend', html);
+
+    // Auto-expand latest completed step, scroll into view
+    if (!isRunning && step.status !== 'skipped') {
+      var collapseEl = document.getElementById(collapseId);
+      if (collapseEl && typeof bootstrap !== 'undefined') {
+        new bootstrap.Collapse(collapseEl, { toggle: true });
+      }
+    }
+  }
+
+  function _buildStepBody(step) {
+    let html = '';
+    if (step.error) {
+      html += '<div class="alert alert-danger py-1 px-2 small mb-2"><i class="fas fa-exclamation-circle me-1"></i>' + step.error + '</div>';
+    }
+    if (step.reason) {
+      html += '<div class="text-muted small mb-2"><i class="fas fa-forward me-1"></i>' + step.reason + '</div>';
+    }
+
+    // Page visits within this step
+    var visits = (step.data && step.data.page_visits) ? step.data.page_visits : [];
+    if (visits.length) {
+      for (var vi = 0; vi < visits.length; vi++) {
+        var visit = visits[vi];
+        html += '<div class="card mb-2 border-light">';
+        html += '<div class="card-header py-1 px-2 bg-light small">';
+        html += '<i class="fas fa-globe me-1"></i>';
+        html += '<a href="' + (visit.url || '#') + '" target="_blank" class="text-break">' + (visit.url || 'N/A').replace(/https?:\/\/[^/]+/, '') + '</a>';
+        if (visit.timestamp) html += '<span class="text-muted ms-2">' + visit.timestamp.split('T')[1].split('.')[0] + '</span>';
+        html += '</div><div class="card-body p-2">';
+
+        // Errors on page
+        if (visit.errors && visit.errors.length) {
+          for (var ei = 0; ei < visit.errors.length; ei++) {
+            html += '<div class="alert alert-danger py-1 px-2 mb-1 small"><i class="fas fa-exclamation-circle me-1"></i>' + visit.errors[ei] + '</div>';
+          }
+        }
+
+        // Form elements table
+        if (visit.form_elements && visit.form_elements.length) {
+          html += '<table class="table table-sm table-bordered small mb-2">';
+          html += '<thead class="table-light"><tr><th>Label</th><th>Name</th><th>Type</th><th>Value</th></tr></thead><tbody>';
+          for (var fi = 0; fi < visit.form_elements.length; fi++) {
+            var el = visit.form_elements[fi];
+            var icon = (el.type !== 'submit' && el.value) ? '<i class="fas fa-check text-success ms-1"></i>' :
+                       (el.type !== 'submit' && !el.value) ? '<i class="fas fa-times text-danger ms-1"></i>' : '';
+            html += '<tr>';
+            html += '<td>' + (el.label || '<span class="text-muted">-</span>') + '</td>';
+            html += '<td><code>' + (el.name || '-') + '</code></td>';
+            html += '<td><span class="badge bg-light text-dark">' + (el.type || el.tag) + '</span></td>';
+            html += '<td>' + (el.value || '<em class="text-danger">empty</em>') + icon + '</td>';
+            html += '</tr>';
+          }
+          html += '</tbody></table>';
+        }
+
+        // Screenshot
+        if (visit.screenshot_url) {
+          html += '<a href="' + visit.screenshot_url + '" target="_blank">';
+          html += '<img src="' + visit.screenshot_url + '" class="img-fluid border rounded" style="max-height:300px" loading="lazy" alt="Screenshot">';
+          html += '</a>';
+        }
+
+        html += '</div></div>';
+      }
+    }
+
+    // Data summary (non-page-visits fields)
+    if (step.data) {
+      var dataKeys = Object.keys(step.data).filter(function(k) { return k !== 'page_visits'; });
+      if (dataKeys.length) {
+        var summary = {};
+        for (var di = 0; di < dataKeys.length; di++) {
+          var k = dataKeys[di];
+          var v = step.data[k];
+          if (Array.isArray(v)) summary[k] = v.length + ' items';
+          else summary[k] = v;
+        }
+        html += '<details class="small mt-2"><summary class="text-muted">Data summary</summary>';
+        html += '<pre class="bg-dark text-light p-2 rounded small mt-1" style="max-height:200px;overflow-y:auto">' + JSON.stringify(summary, null, 2) + '</pre>';
+        html += '</details>';
+      }
+    }
+
+    return html;
+  }
+
+  // --- Page visits accordion renderer ---
+
+  function renderPageVisits(groupId, data) {
+    const container = document.getElementById('page-visits-' + groupId);
+    if (!container) return;
+
+    // Collect page_visits from all results (single, polled, workflow)
+    let visits = [];
+    if (data && data.page_visits) {
+      visits = data.page_visits;
+    } else if (data && data.data && data.data.page_visits) {
+      visits = data.data.page_visits;
+    } else if (data && data.steps) {
+      // Workflow: collect from each step's data
+      for (const step of data.steps) {
+        if (step.data && step.data.page_visits) {
+          for (const v of step.data.page_visits) {
+            v._workflow_step = step.step;
+            visits.push(v);
+          }
+        }
+      }
+    } else if (typeof data === 'object') {
+      // Polled results: multiple request_ids
+      for (const key of Object.keys(data)) {
+        const r = data[key];
+        if (r && r.data && r.data.page_visits) {
+          for (const v of r.data.page_visits) {
+            v._request_id = key;
+            visits.push(v);
+          }
+        }
+      }
+    }
+    if (!visits.length) {
+      container.innerHTML = '';
+      return;
+    }
+
+    const accId = 'pv-acc-' + groupId;
+    let html = '<h6 class="text-muted mb-2"><i class="fas fa-route me-1"></i>Page Visits (' + visits.length + ')</h6>';
+    html += '<div class="accordion accordion-flush" id="' + accId + '">';
+
+    visits.forEach(function(visit, idx) {
+      const collapseId = accId + '-' + idx;
+      const stepLabel = visit._workflow_step ? '<span class="badge bg-info me-1">' + visit._workflow_step + '</span>' : '';
+      const reqLabel = visit._request_id ? '<span class="badge bg-secondary me-1">' + visit._request_id.substring(0, 20) + '</span>' : '';
+      const errorBadge = visit.errors && visit.errors.length ? '<span class="badge bg-danger ms-1">' + visit.errors.length + ' error(s)</span>' : '';
+      const urlShort = visit.url ? visit.url.replace(/https?:\/\/[^/]+/, '') : '';
+
+      html += '<div class="accordion-item">';
+      html += '<h2 class="accordion-header">';
+      html += '<button class="accordion-button collapsed py-2 small" type="button" data-bs-toggle="collapse" data-bs-target="#' + collapseId + '">';
+      html += stepLabel + reqLabel;
+      html += '<strong>' + (visit.step || 'page') + '</strong>';
+      html += '<span class="text-muted ms-2 text-truncate" style="max-width:400px">' + urlShort + '</span>';
+      html += errorBadge;
+      html += '</button></h2>';
+      html += '<div id="' + collapseId + '" class="accordion-collapse collapse" data-bs-parent="#' + accId + '">';
+      html += '<div class="accordion-body p-2">';
+
+      // URL
+      html += '<div class="mb-2"><strong>URL:</strong> <a href="' + (visit.url || '') + '" target="_blank" class="text-break small">' + (visit.url || 'N/A') + '</a></div>';
+
+      // Timestamp
+      if (visit.timestamp) {
+        html += '<div class="mb-2"><strong>Time:</strong> <span class="small text-muted">' + visit.timestamp + '</span></div>';
+      }
+
+      // Errors
+      if (visit.errors && visit.errors.length) {
+        html += '<div class="mb-2">';
+        for (const err of visit.errors) {
+          html += '<div class="alert alert-danger py-1 px-2 mb-1 small"><i class="fas fa-exclamation-circle me-1"></i>' + err + '</div>';
+        }
+        html += '</div>';
+      }
+
+      // Form elements
+      if (visit.form_elements && visit.form_elements.length) {
+        html += '<div class="mb-2"><strong>Form Fields:</strong></div>';
+        html += '<table class="table table-sm table-bordered small mb-2">';
+        html += '<thead class="table-light"><tr><th>Label</th><th>Name</th><th>Type</th><th>Value</th></tr></thead><tbody>';
+        for (const el of visit.form_elements) {
+          const valClass = (el.type === 'submit') ? 'text-muted' : (el.value ? '' : 'text-danger');
+          const filled = (el.type !== 'submit' && el.value) ? '<i class="fas fa-check text-success ms-1"></i>' : '';
+          const empty = (el.type !== 'submit' && !el.value) ? '<i class="fas fa-times text-danger ms-1"></i>' : '';
+          html += '<tr>';
+          html += '<td>' + (el.label || '<span class="text-muted">-</span>') + '</td>';
+          html += '<td><code>' + (el.name || '-') + '</code></td>';
+          html += '<td><span class="badge bg-light text-dark">' + (el.type || el.tag) + '</span></td>';
+          html += '<td class="' + valClass + '">' + (el.value || '<em>empty</em>') + filled + empty + '</td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+      }
+
+      // Screenshot
+      if (visit.screenshot_url) {
+        html += '<div class="mb-2"><strong>Screenshot:</strong></div>';
+        html += '<a href="' + visit.screenshot_url + '" target="_blank">';
+        html += '<img src="' + visit.screenshot_url + '" class="img-fluid border rounded" style="max-height:400px" loading="lazy" alt="Page screenshot">';
+        html += '</a>';
+      }
+
+      html += '</div></div></div>';
+    });
+
+    html += '</div>';
+    container.innerHTML = html;
   }
 
   // --- CSV drop zone, file loader, validation & preview ---

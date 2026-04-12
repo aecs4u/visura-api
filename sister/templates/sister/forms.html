@@ -115,11 +115,31 @@
                             <button class="btn btn-outline-primary btn-copy-response" data-form-group="{{ form_group.id }}">
                                 <i class="fas fa-copy me-1"></i>Copy
                             </button>
+                            <button class="btn btn-outline-success btn-export-response" data-form-group="{{ form_group.id }}">
+                                <i class="fas fa-download me-1"></i>Export
+                            </button>
                         </div>
                     </div>
                     <div class="card-body">
                         <div id="response-status-{{ form_group.id }}" class="mb-3"></div>
-                        <pre id="response-content-{{ form_group.id }}" class="bg-dark text-light p-3 rounded" style="max-height: 500px; overflow-y: auto;"></pre>
+                        {# Page visits accordion #}
+                        <div id="page-visits-{{ form_group.id }}" class="mb-3"></div>
+                        {# Raw JSON response #}
+                        <div class="accordion mb-3" id="raw-json-accordion-{{ form_group.id }}">
+                            <div class="accordion-item">
+                                <h2 class="accordion-header">
+                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                                            data-bs-target="#raw-json-collapse-{{ form_group.id }}">
+                                        <i class="fas fa-code me-2"></i>Raw JSON
+                                    </button>
+                                </h2>
+                                <div id="raw-json-collapse-{{ form_group.id }}" class="accordion-collapse collapse">
+                                    <div class="accordion-body p-0">
+                                        <pre id="response-content-{{ form_group.id }}" class="bg-dark text-light p-3 rounded-0 mb-0" style="max-height: 500px; overflow-y: auto;"></pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

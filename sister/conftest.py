@@ -127,7 +127,7 @@ async def _empty_list(*_args, **_kwargs):
 
 
 async def _db_stats(*_args, **_kwargs):
-    return {"total_requests": 0, "total_responses": 0, "successful": 0, "failed": 0}
+    return {"total_requests": 0, "total_responses": 0, "successful": 0, "failed": 0, "pending": 0}
 
 
 @pytest.fixture()

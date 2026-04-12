@@ -10,9 +10,11 @@ so that interrupted runs can be resumed.
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+from .database import save_request, save_response
 from .models import STEP_METADATA, WORKFLOW_PRESETS, WorkflowInput, _DEPTH_ORDER
 from .services import VisuraService
 from .utils import (
@@ -273,10 +275,10 @@ async def _save_workflow_run(workflow_id: str, preset: str, input_data: dict, st
 async def _save_workflow_step(workflow_id: str, step_key: str, status: str,
                               result_json: Optional[dict] = None, error: Optional[str] = None):
     """Persist a workflow step result."""
-    from .database import _get_session
+    from .database import _get_session_factory
 
     now = datetime.now().isoformat()
-    async with _get_session() as session:
+    async with _get_session_factory()() as session:
         from sqlalchemy import text
         await session.execute(text(
             "INSERT OR REPLACE INTO workflow_steps "
@@ -323,11 +325,39 @@ async def _finish_workflow_run(workflow_id: str, status: str, output_json: Optio
             "oj": json.dumps(output_json, default=str) if output_json else None,
             "now": datetime.now().isoformat()})
         await session.commit()
+        # Flush WAL to main database file
+        await session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+
 
 
 # ---------------------------------------------------------------------------
 # Step executors
 # ---------------------------------------------------------------------------
+
+
+async def _persist_step_response(step_name: str, tipo_catasto: str, params: dict, result: dict) -> None:
+    """Persist a workflow step's browser result to the response tables and outputs/."""
+    request_id = f"wf_{step_name}_{params.get('provincia', '')}_{params.get('foglio', '')}_{params.get('particella', '')}_{uuid4().hex[:8]}"
+    try:
+        await save_request(
+            request_id=request_id,
+            request_type=f"workflow_{step_name}",
+            tipo_catasto=tipo_catasto,
+            provincia=params.get("provincia", ""),
+            comune=params.get("comune", ""),
+            foglio=params.get("foglio", ""),
+            particella=params.get("particella", ""),
+            sezione=params.get("sezione"),
+            subalterno=params.get("subalterno"),
+        )
+        await save_response(
+            request_id=request_id,
+            success=True,
+            tipo_catasto=tipo_catasto,
+            data=result,
+        )
+    except Exception as e:
+        logger.warning("Failed to persist step response '%s': %s", step_name, e)
 
 
 async def _exec_search(page, params: dict, step_results: list[dict]) -> dict:
@@ -339,11 +369,13 @@ async def _exec_search(page, params: dict, step_results: list[dict]) -> dict:
             page, params["provincia"], params["comune"], params.get("sezione"),
             params["foglio"], params["particella"], tc,
             extract_intestati=False, subalterno=params.get("subalterno"),
+            sezione_urbana=params.get("sezione_urbana"),
         )
         if isinstance(result, dict):
             for imm in result.get("immobili", []):
                 imm["_tipo_catasto"] = tc
             all_immobili.extend(result.get("immobili", []))
+            await _persist_step_response("search", tc, params, result)
     return {"immobili": all_immobili, "total": len(all_immobili)}
 
 
@@ -376,8 +408,10 @@ async def _exec_intestati(page, params: dict, step_results: list[dict]) -> dict:
                     res = await run_visura(
                         page, params["provincia"], params["comune"], params.get("sezione"),
                         params["foglio"], params["particella"], tc,
-                        extract_intestati=True,
+                        extract_intestati=True, sezione_urbana=params.get("sezione_urbana"),
                     )
+                if isinstance(res, dict):
+                    await _persist_step_response("intestati", tc, params, res)
                 intestati = res.get("intestati", []) if isinstance(res, dict) else []
                 for intest in intestati:
                     intest["_tipo_catasto"] = tc
@@ -389,8 +423,11 @@ async def _exec_intestati(page, params: dict, step_results: list[dict]) -> dict:
         tc = params.get("tipo_catasto") or "T"
         res = await run_visura(
             page, params["provincia"], params["comune"], params.get("sezione"),
-            params["foglio"], params["particella"], tc, extract_intestati=True,
+            params["foglio"], params["particella"], tc,
+            extract_intestati=True, sezione_urbana=params.get("sezione_urbana"),
         )
+        if isinstance(res, dict):
+            await _persist_step_response("intestati", tc, params, res)
         all_intestati = res.get("intestati", []) if isinstance(res, dict) else []
 
     return {"intestati": all_intestati, "total": len(all_intestati)}
@@ -398,20 +435,26 @@ async def _exec_intestati(page, params: dict, step_results: list[dict]) -> dict:
 
 async def _exec_soggetto(page, params: dict, step_results: list[dict]) -> dict:
     """Run national subject search."""
-    return await run_visura_soggetto(
+    tc = params.get("tipo_catasto", "E")
+    result = await run_visura_soggetto(
         page, codice_fiscale=params["codice_fiscale"],
-        tipo_catasto=params.get("tipo_catasto", "E"),
-        provincia=params.get("provincia"),
+        tipo_catasto=tc, provincia=params.get("provincia"),
     )
+    if isinstance(result, dict):
+        await _persist_step_response("soggetto", tc, params, result)
+    return result
 
 
 async def _exec_azienda(page, params: dict, step_results: list[dict]) -> dict:
     """Run company search."""
-    return await run_visura_persona_giuridica(
+    tc = params.get("tipo_catasto", "E")
+    result = await run_visura_persona_giuridica(
         page, identificativo=params["identificativo"],
-        tipo_catasto=params.get("tipo_catasto", "E"),
-        provincia=params.get("provincia"),
+        tipo_catasto=tc, provincia=params.get("provincia"),
     )
+    if isinstance(result, dict):
+        await _persist_step_response("azienda", tc, params, result)
+    return result
 
 
 async def _exec_drill_intestati(page, params: dict, step_results: list[dict]) -> dict:
@@ -446,6 +489,8 @@ async def _exec_drill_intestati(page, params: dict, step_results: list[dict]) ->
                     page, prop["provincia"], prop["comune"], prop.get("sezione"),
                     prop["foglio"], prop["particella"], tc, extract_intestati=True,
                 )
+            if isinstance(res, dict):
+                await _persist_step_response("drill_intestati", tc, prop, res)
             intestati = res.get("intestati", []) if isinstance(res, dict) else []
             all_drill.append({"property": prop, "intestati": intestati, "status": "completed"})
         except Exception as e:
@@ -460,11 +505,14 @@ async def _exec_drill_intestati(page, params: dict, step_results: list[dict]) ->
 
 
 async def _exec_elenco(page, params: dict, step_results: list[dict]) -> dict:
-    return await run_elenco_immobili(
+    tc = params.get("tipo_catasto", "T")
+    result = await run_elenco_immobili(
         page, params["provincia"], params["comune"],
-        tipo_catasto=params.get("tipo_catasto", "T"),
-        foglio=params.get("foglio"), sezione=params.get("sezione"),
+        tipo_catasto=tc, foglio=params.get("foglio"), sezione=params.get("sezione"),
     )
+    if isinstance(result, dict):
+        await _persist_step_response("elenco", tc, params, result)
+    return result
 
 
 async def _exec_mappa(page, params: dict, step_results: list[dict]) -> dict:
@@ -505,10 +553,13 @@ async def _exec_ispezioni_cart(page, params: dict, step_results: list[dict]) -> 
 
 
 async def _exec_indirizzo_search(page, params: dict, step_results: list[dict]) -> dict:
+    tc = params.get("tipo_catasto", "T")
     result = await run_ricerca_indirizzo(
         page, params["provincia"], comune=params["comune"],
-        tipo_catasto=params.get("tipo_catasto", "T"), indirizzo=params["indirizzo"],
+        tipo_catasto=tc, indirizzo=params["indirizzo"],
     )
+    if isinstance(result, dict):
+        await _persist_step_response("indirizzo", tc, params, result)
     # Extract foglio/particella from results for follow-up steps
     if isinstance(result, dict) and not params.get("foglio"):
         immobili = result.get("risultati", result.get("immobili", []))
@@ -1353,7 +1404,7 @@ async def run_workflow(
         "provincia": wf.provincia, "comune": wf.comune,
         "foglio": wf.foglio, "particella": wf.particella,
         "tipo_catasto": wf.tipo_catasto or "T",
-        "sezione": wf.sezione, "subalterno": wf.subalterno,
+        "sezione": wf.sezione, "sezione_urbana": wf.sezione_urbana, "subalterno": wf.subalterno,
         "codice_fiscale": wf.codice_fiscale,
         "identificativo": wf.identificativo,
         "indirizzo": wf.indirizzo,
@@ -1417,27 +1468,39 @@ async def run_workflow(
                 logger.info("Resumed step '%s' (workflow %s)", step_name, workflow_id)
                 continue
 
-            try:
-                data = await executor(page, params, step_results)
-                step_result = {"step": step_name, "status": "completed", "data": data}
-                step_results.append(step_result)
-                params["_total_step_count"] = params.get("_total_step_count", 0) + 1
-
-                # Persist step
+            for attempt in range(2):
                 try:
-                    await _save_workflow_step(workflow_id, sk, "completed", result_json=data)
+                    data = await executor(page, params, step_results)
+                    step_result = {"step": step_name, "status": "completed", "data": data}
+                    step_results.append(step_result)
+                    params["_total_step_count"] = params.get("_total_step_count", 0) + 1
+
+                    # Persist step
+                    try:
+                        await _save_workflow_step(workflow_id, sk, "completed", result_json=data)
+                    except Exception as e:
+                        logger.warning("Failed to persist step '%s': %s", step_name, e)
+
+                    break  # success — no retry needed
+
                 except Exception as e:
-                    logger.warning("Failed to persist step '%s': %s", step_name, e)
+                    is_session_expired = "Sessione scaduta" in str(e)
+                    if is_session_expired and attempt == 0:
+                        logger.warning("Session expired during step '%s', re-authenticating...", step_name)
+                        try:
+                            page = await service.browser_manager._get_authenticated_page()
+                            continue  # retry the step
+                        except Exception as reauth_err:
+                            logger.error("Re-authentication failed: %s", reauth_err)
 
-            except Exception as e:
-                logger.error("Workflow step '%s' failed: %s", step_name, e)
-                step_result = {"step": step_name, "status": "error", "error": str(e)}
-                step_results.append(step_result)
+                    logger.error("Workflow step '%s' failed: %s", step_name, e)
+                    step_result = {"step": step_name, "status": "error", "error": str(e)}
+                    step_results.append(step_result)
 
-                try:
-                    await _save_workflow_step(workflow_id, sk, "error", error=str(e))
-                except Exception:
-                    pass
+                    try:
+                        await _save_workflow_step(workflow_id, sk, "error", error=str(e))
+                    except Exception:
+                        pass
 
     # Build aggregate
     aggregate = _build_aggregate(step_results)
@@ -1474,4 +1537,214 @@ async def run_workflow(
     except Exception as e:
         logger.warning("Failed to finalize workflow run: %s", e)
 
+    # Export to outputs/ directory
+    try:
+        from .database import OUTPUTS_DIR
+        outputs_dir = Path(OUTPUTS_DIR)
+        outputs_dir.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = outputs_dir / f"{wf.preset}_{ts}.json"
+        output_path.write_text(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+        logger.info("Workflow output saved to %s", output_path)
+    except Exception as e:
+        logger.warning("Failed to export workflow output: %s", e)
+
     return output
+
+
+async def run_workflow_stream(
+    service: VisuraService,
+    wf: WorkflowInput,
+    workflow_id: Optional[str] = None,
+    resume: bool = False,
+):
+    """Execute a workflow yielding SSE events for each step as it completes.
+
+    Yields JSON-serialized dicts with event types:
+      - {"event": "step", "step": ..., "status": ..., "data": ...}
+      - {"event": "done", "workflow_id": ..., "summary": ..., "aggregate": ...}
+    """
+    preset_def = WORKFLOW_PRESETS[wf.preset]
+    max_depth = _DEPTH_ORDER.get(wf.depth, 1)
+
+    steps_to_run = []
+    for step_name in preset_def["steps"]:
+        meta = STEP_METADATA.get(step_name, {"depth": "standard", "paid": False})
+        step_depth = _DEPTH_ORDER.get(meta["depth"], 1)
+        if step_depth > max_depth:
+            continue
+        if meta["paid"] and not (wf.include_paid_steps and wf.auto_confirm):
+            continue
+        steps_to_run.append(step_name)
+
+    field_map = {
+        "provincia": wf.provincia, "comune": wf.comune, "foglio": wf.foglio,
+        "particella": wf.particella, "codice_fiscale": wf.codice_fiscale,
+        "identificativo": wf.identificativo, "indirizzo": wf.indirizzo,
+    }
+    missing = [f for f in preset_def["requires"] if not field_map.get(f)]
+    if missing:
+        yield json.dumps({"event": "error", "error": f"Missing required fields: {', '.join(missing)}"}, default=str)
+        return
+
+    if not workflow_id:
+        workflow_id = f"wf_{wf.preset}_{uuid4().hex[:12]}"
+
+    params = {
+        "provincia": wf.provincia, "comune": wf.comune,
+        "foglio": wf.foglio, "particella": wf.particella,
+        "tipo_catasto": wf.tipo_catasto or "T",
+        "sezione": wf.sezione, "sezione_urbana": wf.sezione_urbana, "subalterno": wf.subalterno,
+        "codice_fiscale": wf.codice_fiscale,
+        "identificativo": wf.identificativo,
+        "indirizzo": wf.indirizzo,
+        "auto_confirm": wf.auto_confirm,
+        "max_fanout": wf.max_fanout,
+        "max_owners": wf.max_owners,
+        "max_properties_per_owner": wf.max_properties_per_owner,
+        "max_historical_properties": wf.max_historical_properties,
+        "max_paid_steps": wf.max_paid_steps,
+        "max_total_steps": wf.max_total_steps,
+        "_paid_step_count": 0,
+        "_total_step_count": 0,
+    }
+
+    try:
+        await _save_workflow_run(workflow_id, wf.preset, params)
+    except Exception as e:
+        logger.warning("Failed to persist workflow run: %s", e)
+
+    # Yield initial event with plan
+    yield json.dumps({
+        "event": "start",
+        "workflow_id": workflow_id,
+        "preset": wf.preset,
+        "description": preset_def["description"],
+        "planned_steps": steps_to_run,
+    }, default=str)
+
+    completed_steps: dict[str, dict] = {}
+    if resume:
+        try:
+            completed_steps = await _load_completed_steps(workflow_id)
+        except Exception as e:
+            logger.warning("Failed to load completed steps for resume: %s", e)
+
+    step_results: list[dict] = []
+
+    async with service.browser_manager._page_lock:
+        page = await service.browser_manager._get_authenticated_page()
+
+        for step_name in steps_to_run:
+            if params.get("_total_step_count", 0) >= params.get("max_total_steps", 100):
+                sr = {"step": step_name, "status": "skipped", "data": None, "reason": "max_total_steps reached"}
+                step_results.append(sr)
+                yield json.dumps({"event": "step", **sr}, default=str)
+                continue
+
+            sk = _step_key(step_name)
+            executor = _STEP_EXECUTORS.get(step_name)
+
+            if not executor:
+                sr = {"step": step_name, "status": "skipped", "data": None, "error": f"Unknown step: {step_name}"}
+                step_results.append(sr)
+                yield json.dumps({"event": "step", **sr}, default=str)
+                continue
+
+            meta = STEP_METADATA.get(step_name, {})
+            when_fn = meta.get("when")
+            if when_fn and not when_fn(step_results, params):
+                sr = {"step": step_name, "status": "skipped", "data": None, "reason": "precondition not met"}
+                step_results.append(sr)
+                yield json.dumps({"event": "step", **sr}, default=str)
+                continue
+
+            if sk in completed_steps:
+                cached = completed_steps[sk]
+                sr = {"step": step_name, "status": "completed", "data": cached.get("data"), "resumed": True}
+                step_results.append(sr)
+                yield json.dumps({"event": "step", **sr}, default=str)
+                continue
+
+            # Yield "running" event before execution
+            yield json.dumps({"event": "step", "step": step_name, "status": "running"}, default=str)
+
+            for attempt in range(2):
+                try:
+                    data = await executor(page, params, step_results)
+                    sr = {"step": step_name, "status": "completed", "data": data}
+                    step_results.append(sr)
+                    params["_total_step_count"] = params.get("_total_step_count", 0) + 1
+
+                    try:
+                        await _save_workflow_step(workflow_id, sk, "completed", result_json=data)
+                    except Exception as e:
+                        logger.warning("Failed to persist step '%s': %s", step_name, e)
+
+                    yield json.dumps({"event": "step", **sr}, default=str)
+                    break
+
+                except Exception as e:
+                    is_session_expired = "Sessione scaduta" in str(e)
+                    if is_session_expired and attempt == 0:
+                        logger.warning("Session expired during step '%s', re-authenticating...", step_name)
+                        try:
+                            page = await service.browser_manager._get_authenticated_page()
+                            continue
+                        except Exception as reauth_err:
+                            logger.error("Re-authentication failed: %s", reauth_err)
+
+                    logger.error("Workflow step '%s' failed: %s", step_name, e)
+                    sr = {"step": step_name, "status": "error", "error": str(e)}
+                    step_results.append(sr)
+
+                    try:
+                        await _save_workflow_step(workflow_id, sk, "error", error=str(e))
+                    except Exception:
+                        pass
+
+                    yield json.dumps({"event": "step", **sr}, default=str)
+
+    # Final aggregate
+    aggregate = _build_aggregate(step_results)
+    completed_count = sum(1 for s in step_results if s["status"] == "completed")
+    failed_count = sum(1 for s in step_results if s["status"] == "error")
+    skipped_count = sum(1 for s in step_results if s["status"] == "skipped")
+
+    output = {
+        "workflow_id": workflow_id,
+        "preset": wf.preset,
+        "description": preset_def["description"],
+        "steps": step_results,
+        "aggregate": aggregate,
+        "summary": {
+            "total_steps": len(step_results),
+            "completed": completed_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "properties": len(aggregate["properties"]),
+            "owners": len(aggregate["owners"]),
+            "addresses": len(aggregate.get("addresses", [])),
+            "risk_flags": len(aggregate.get("risk_flags", [])),
+            "links": len(aggregate.get("links", [])),
+            "timeline_events": len(aggregate.get("timeline", [])),
+        },
+    }
+
+    final_status = "completed" if failed_count == 0 else "partial"
+    try:
+        await _finish_workflow_run(workflow_id, final_status, output)
+    except Exception as e:
+        logger.warning("Failed to finalize workflow run: %s", e)
+
+    try:
+        from .database import OUTPUTS_DIR
+        outputs_dir = Path(OUTPUTS_DIR)
+        outputs_dir.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = outputs_dir / f"{wf.preset}_{ts}.json"
+        output_path.write_text(json.dumps(output, indent=2, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+
+    yield json.dumps({"event": "done", **output}, default=str)

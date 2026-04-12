@@ -7,12 +7,15 @@ Auth: landing page is public; /web/* routes require authentication.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import StreamingResponse
 
-from .database import count_responses, find_responses, get_response
+from .database import count_responses, find_responses, get_result_record
 from .form_config import get_available_form_groups, get_single_step_groups, get_workflow_groups
 
 logger = logging.getLogger("sister")
@@ -49,6 +52,81 @@ async def _require_auth(request: Request):
         if user:
             return user
         return None
+
+
+def _build_url(path: str, **params) -> str:
+    """Build a URL with only non-empty query params."""
+    filtered = {k: v for k, v in params.items() if v not in (None, "")}
+    if not filtered:
+        return path
+    return f"{path}?{urlencode(filtered)}"
+
+
+def _format_timestamp(value: Optional[str]) -> Optional[str]:
+    """Format ISO timestamps for human-readable display."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return value.replace("T", " ")[:16]
+
+
+def _titleize_key(value: str) -> str:
+    return value.replace("_", " ").strip().title()
+
+
+def _build_result_sections(data: Optional[dict]) -> list[dict]:
+    """Normalize arbitrary response payloads into render-friendly sections."""
+    if not isinstance(data, dict):
+        return []
+
+    sections: list[dict] = []
+    for key, value in data.items():
+        if key == "page_visits":
+            continue
+
+        title = _titleize_key(key)
+        if isinstance(value, list):
+            if value and all(isinstance(item, dict) for item in value):
+                columns: list[str] = []
+                for item in value:
+                    for col in item.keys():
+                        if col not in columns:
+                            columns.append(col)
+                rows = [{col: item.get(col) for col in columns} for item in value]
+                sections.append({
+                    "name": key,
+                    "title": title,
+                    "kind": "table",
+                    "columns": columns,
+                    "rows": rows,
+                    "count": len(rows),
+                })
+            else:
+                sections.append({
+                    "name": key,
+                    "title": title,
+                    "kind": "list",
+                    "items": value,
+                    "count": len(value),
+                })
+        elif isinstance(value, dict):
+            sections.append({
+                "name": key,
+                "title": title,
+                "kind": "object",
+                "items": list(value.items()),
+                "count": len(value),
+            })
+        else:
+            sections.append({
+                "name": key,
+                "title": title,
+                "kind": "value",
+                "value": value,
+            })
+    return sections
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +193,8 @@ async def web_results(
     user=Depends(_require_auth),
     provincia: Optional[str] = None,
     comune: Optional[str] = None,
+    foglio: Optional[str] = None,
+    particella: Optional[str] = None,
     tipo_catasto: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
@@ -122,15 +202,44 @@ async def web_results(
     """Results browser — paginated list from database."""
     theme = _get_theme(request)
     results = await find_responses(
-        provincia=provincia, comune=comune, tipo_catasto=tipo_catasto,
+        provincia=provincia,
+        comune=comune,
+        foglio=foglio,
+        particella=particella,
+        tipo_catasto=tipo_catasto,
         limit=limit, offset=offset,
     )
+    for item in results:
+        item["requested_at_display"] = _format_timestamp(item.get("requested_at"))
+        item["responded_at_display"] = _format_timestamp(item.get("responded_at"))
+        item["status"] = (
+            "completed" if item.get("success") is True
+            else "failed" if item.get("success") is False
+            else "pending"
+        )
     stats = await count_responses()
+    current_filters = {
+        "provincia": provincia,
+        "comune": comune,
+        "foglio": foglio,
+        "particella": particella,
+        "tipo_catasto": tipo_catasto,
+        "limit": limit,
+    }
+    prev_url = None
+    if offset > 0:
+        prev_url = _build_url("/web/results", offset=max(offset - limit, 0), **current_filters)
+    next_url = None
+    if len(results) == limit:
+        next_url = _build_url("/web/results", offset=offset + limit, **current_filters)
+
     return theme.render(
         "sister/results.html", request, user=user,
         results=results, stats=stats,
-        provincia=provincia, comune=comune, tipo_catasto=tipo_catasto,
-        limit=limit, offset=offset,
+        provincia=provincia, comune=comune, foglio=foglio, particella=particella,
+        tipo_catasto=tipo_catasto, limit=limit, offset=offset,
+        prev_url=prev_url, next_url=next_url,
+        current_count=len(results),
     )
 
 
@@ -138,12 +247,22 @@ async def web_results(
 async def web_result_detail(request: Request, request_id: str, user=Depends(_require_auth)):
     """Single result detail page."""
     theme = _get_theme(request)
-    response_data = await get_response(request_id)
-    if not response_data:
-        return theme.render("sister/result_detail.html", request, user=user, result=None, request_id=request_id)
+    result = await get_result_record(request_id)
+    if result is None:
+        response = theme.render(
+            "sister/result_detail.html", request, user=user,
+            result=None, request_id=request_id, not_found=True,
+        )
+        if hasattr(response, "status_code"):
+            response.status_code = 404
+        return response
+
+    result["requested_at_display"] = _format_timestamp(result.get("requested_at"))
+    result["responded_at_display"] = _format_timestamp(result.get("responded_at"))
+    result["sections"] = _build_result_sections(result.get("data"))
     return theme.render(
         "sister/result_detail.html", request, user=user,
-        result=response_data, request_id=request_id,
+        result=result, request_id=request_id, not_found=False,
     )
 
 
@@ -235,6 +354,35 @@ async def web_api_batch(request: Request, user=Depends(_require_auth)):
     })
 
 
+@router.post("/web/api/workflow/stream")
+async def web_api_workflow_stream(request: Request, user=Depends(_require_auth)):
+    """SSE proxy for workflow streaming — passes through events incrementally."""
+    import httpx
+
+    body = await request.json()
+    base = f"http://localhost:{request.url.port or 8025}"
+
+    async def stream_events():
+        async with httpx.AsyncClient(timeout=600) as client:
+            async with client.stream(
+                "POST", f"{base}/visura/workflow/stream",
+                json=body,
+            ) as resp:
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        event, buffer = buffer.split("\n\n", 1)
+                        event = event.strip()
+                        if event.startswith("data: "):
+                            yield f"{event}\n\n"
+                # Flush remaining buffer
+                if buffer.strip().startswith("data: "):
+                    yield f"{buffer.strip()}\n\n"
+
+    return StreamingResponse(stream_events(), media_type="text/event-stream")
+
+
 @router.post("/web/api/{endpoint:path}", response_class=JSONResponse)
 async def web_api_proxy(endpoint: str, request: Request, user=Depends(_require_auth)):
     """Proxy form submissions to the sister API."""
@@ -243,12 +391,16 @@ async def web_api_proxy(endpoint: str, request: Request, user=Depends(_require_a
     body = await request.json()
     base = f"http://localhost:{request.url.port or 8025}"
 
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
         resp = await client.post(
             f"{base}/visura/{endpoint}",
             json=body,
         )
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    try:
+        content = resp.json()
+    except Exception:
+        content = {"error": resp.text or "Empty response", "status_code": resp.status_code}
+    return JSONResponse(content=content, status_code=resp.status_code)
 
 
 @router.get("/web/api/visura/{request_id}", response_class=JSONResponse)
@@ -258,6 +410,10 @@ async def web_api_poll(request_id: str, request: Request, user=Depends(_require_
 
     base = f"http://localhost:{request.url.port or 8025}"
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         resp = await client.get(f"{base}/visura/{request_id}")
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    try:
+        content = resp.json()
+    except Exception:
+        content = {"error": resp.text or "Empty response", "status_code": resp.status_code}
+    return JSONResponse(content=content, status_code=resp.status_code)

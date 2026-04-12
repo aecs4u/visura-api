@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
+from starlette.responses import StreamingResponse
 
 from .database import count_responses, find_responses
 from .models import (
@@ -83,6 +84,7 @@ async def richiedi_visura(request: VisuraInput, service: VisuraService, force: b
                     provincia=request.provincia,
                     comune=request.comune,
                     sezione=sezione,
+                    sezione_urbana=request.sezione_urbana,
                     foglio=request.foglio,
                     particella=request.particella,
                     subalterno=request.subalterno,
@@ -153,18 +155,20 @@ async def richiedi_intestati_immobile(request: VisuraIntestatiInput, service: Vi
     """Richiede gli intestati per un immobile specifico."""
     try:
         sezione = None if request.sezione == "_" else request.sezione
+        tipo_catasto = request.tipo_catasto or "T"
 
-        request_id = f"intestati_{request.tipo_catasto}_{uuid4().hex}"
+        request_id = f"intestati_{tipo_catasto}_{uuid4().hex}"
 
         intestati_request = VisuraIntestatiRequest(
             request_id=request_id,
-            tipo_catasto=request.tipo_catasto,
+            tipo_catasto=tipo_catasto,
             provincia=request.provincia,
             comune=request.comune,
             foglio=request.foglio,
             particella=request.particella,
             subalterno=request.subalterno,
             sezione=sezione,
+            sezione_urbana=request.sezione_urbana,
         )
 
         result = await service.add_intestati_request(intestati_request, force=force)
@@ -172,7 +176,7 @@ async def richiedi_intestati_immobile(request: VisuraIntestatiInput, service: Vi
         return JSONResponse(
             {
                 "request_id": request_id,
-                "tipo_catasto": request.tipo_catasto,
+                "tipo_catasto": tipo_catasto,
                 "subalterno": request.subalterno,
                 "status": "queued",
                 "message": f"Richiesta intestati aggiunta alla coda per {request.comune} F.{request.foglio} P.{request.particella}",
@@ -408,6 +412,36 @@ async def execute_workflow(request: WorkflowInput, service: VisuraService):
     except Exception as e:
         logger.error("Errore nel workflow '%s': %s", request.preset, e)
         raise HTTPException(status_code=500, detail="Errore interno del server")
+
+
+async def execute_workflow_stream(request: WorkflowInput, service: VisuraService):
+    """Execute a workflow with Server-Sent Events for incremental progress."""
+    from .workflows import run_workflow_stream
+
+    async def event_generator():
+        try:
+            async for chunk in run_workflow_stream(service, request):
+                yield f"data: {chunk}\n\n"
+        except Exception as e:
+            import json
+            logger.error("Errore nel workflow stream '%s': %s", request.preset, e)
+            yield f"data: {json.dumps({'event': 'error', 'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def download_documents(service: VisuraService):
+    """Download all available documents from SISTER Richieste page."""
+    try:
+        documents = await service.download_richieste_documents()
+        return JSONResponse({
+            "status": "completed",
+            "total_documents": len(documents),
+            "documents": [{k: v for k, v in d.items() if k != "parsed_data"} for d in documents],
+        })
+    except Exception as e:
+        logger.error("Errore download documenti: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 async def richiedi_ispezione_ipotecaria(request: IspezioneIpotecariaInput, service: VisuraService, force: bool = False):

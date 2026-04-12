@@ -51,8 +51,10 @@ class VisuraResponseDB(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
 
     request: Optional["VisuraRequestDB"] = Relationship(back_populates="response")
-    immobili: list["ImmobileDB"] = Relationship(back_populates="response")
-    intestati: list["IntestatoDB"] = Relationship(back_populates="response")
+    immobili: list["ImmobileDB"] = Relationship(back_populates="response", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    intestati: list["IntestatoDB"] = Relationship(back_populates="response", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    page_visits: list["PageVisitDB"] = Relationship(back_populates="response", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
+    documents: list["VisuraDocumentDB"] = Relationship(back_populates="response", sa_relationship_kwargs={"cascade": "all, delete-orphan"})
 
 
 class ImmobileDB(SQLModel, table=True):
@@ -172,6 +174,59 @@ class WorkflowStepDB(SQLModel, table=True):
 
     __table_args__ = (
         Index("idx_workflow_steps_lookup", "workflow_id", "step_key"),
+    )
+
+
+class PageVisitDB(SQLModel, table=True):
+    """Browser page visit metadata captured during automation."""
+
+    __tablename__ = "page_visits"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    response_id: str = Field(foreign_key="visura_responses.request_id", index=True)
+    step: str = Field(default="")
+    url: Optional[str] = None
+    screenshot_url: Optional[str] = None
+    form_elements_json: Optional[str] = Field(default=None, sa_column=Column(Text))
+    errors_json: Optional[str] = Field(default=None, sa_column=Column(Text))
+    timestamp: Optional[datetime] = None
+
+    response: Optional["VisuraResponseDB"] = Relationship(back_populates="page_visits")
+
+
+class VisuraDocumentDB(SQLModel, table=True):
+    """Downloaded visura document (PDF/XML/P7M) from SISTER Richieste."""
+
+    __tablename__ = "visura_documents"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    response_id: Optional[str] = Field(default=None, foreign_key="visura_responses.request_id", index=True)
+    document_type: str = Field(default="")  # visura_immobile, visura_soggetto, visura_pnf
+    file_format: str = Field(default="")  # PDF, XML, P7M
+    filename: str = Field(default="")
+    file_path: Optional[str] = None
+    file_size: Optional[int] = None
+    oggetto: Optional[str] = None  # description from Richieste table
+    richiesta_del: Optional[str] = None  # request timestamp from Richieste table
+
+    # Parsed metadata from XML content
+    provincia: Optional[str] = None
+    comune: Optional[str] = None
+    foglio: Optional[str] = None
+    particella: Optional[str] = None
+    subalterno: Optional[str] = None
+    sezione_urbana: Optional[str] = None
+    tipo_catasto: Optional[str] = None  # T or F
+    intestati_json: Optional[str] = Field(default=None, sa_column=Column(Text))  # parsed owners from XML
+    dati_immobile_json: Optional[str] = Field(default=None, sa_column=Column(Text))  # parsed property data from XML
+    xml_content: Optional[str] = Field(default=None, sa_column=Column(Text))  # raw XML content
+
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    response: Optional["VisuraResponseDB"] = Relationship(back_populates="documents")
+
+    __table_args__ = (
+        Index("idx_documents_lookup", "provincia", "comune", "foglio", "particella"),
     )
 
 

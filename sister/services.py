@@ -102,10 +102,35 @@ class BrowserManager:
         return None
 
     async def initialize(self):
-        """Inizializza il browser e il contexto"""
+        """Inizializza il browser e il contexto (maximized window)"""
         try:
+            # Inject --start-maximized into chromium args before launch
+            from aecs4u_auth.browser import manager as _auth_manager
+            if hasattr(_auth_manager, '_CHROMIUM_ARGS'):
+                if "--start-maximized" not in _auth_manager._CHROMIUM_ARGS:
+                    _auth_manager._CHROMIUM_ARGS.append("--start-maximized")
+
+            # Monkey-patch new_context to use no_viewport=True for maximized window
+            _orig_new_context = None
+
+            async def _patched_new_context(**kwargs):
+                kwargs.setdefault("no_viewport", True)
+                return await _orig_new_context(**kwargs)
+
             await self._auth.initialize()
-            logger.info("Browser inizializzato")
+
+            # After initialize, the browser exists — re-create context with no_viewport
+            browser = self._auth._browser
+            if browser:
+                _orig_new_context = browser.new_context
+                browser.new_context = _patched_new_context
+                # Close old context and clear stale page references
+                self._auth._auth_page = None
+                if self._auth._context:
+                    await self._auth._context.close()
+                self._auth._context = await _orig_new_context(no_viewport=True)
+
+            logger.info("Browser inizializzato (maximized)")
         except Exception as e:
             logger.error(f"Failed to initialize browser: {e}")
             raise BrowserError(f"Browser initialization failed: {e}") from e
@@ -161,6 +186,7 @@ class BrowserManager:
                         request.tipo_catasto,
                         extract_intestati=False,
                         subalterno=request.subalterno,
+                        sezione_urbana=request.sezione_urbana,
                     )
                 except Exception as e:
                     raise BrowserError(f"Failed to execute visura: {e}") from e
@@ -205,6 +231,7 @@ class BrowserManager:
                         foglio=request.foglio,
                         particella=request.particella,
                         subalterno=request.subalterno,
+                        sezione_urbana=request.sezione_urbana,
                     )
                 else:
                     result = await run_visura(
@@ -216,6 +243,7 @@ class BrowserManager:
                         request.particella,
                         request.tipo_catasto,
                         extract_intestati=True,
+                        sezione_urbana=request.sezione_urbana,
                     )
 
             logger.info(f"Visura intestati completata per {request.request_id}")
@@ -246,7 +274,7 @@ class BrowserManager:
                         codice_fiscale=request.codice_fiscale,
                         tipo_catasto=request.tipo_catasto,
                         provincia=request.provincia,
-                        motivo="Search",
+                        motivo="Esplorazione",
                     )
                 except Exception as e:
                     raise BrowserError(f"Failed to execute soggetto search: {e}") from e
@@ -287,7 +315,7 @@ class BrowserManager:
                         identificativo=request.identificativo,
                         tipo_catasto=request.tipo_catasto,
                         provincia=request.provincia,
-                        motivo="Search",
+                        motivo="Esplorazione",
                     )
                 except Exception as e:
                     raise BrowserError(f"Failed to execute PNF search: {e}") from e
@@ -322,7 +350,7 @@ class BrowserManager:
                         tipo_catasto=request.tipo_catasto,
                         foglio=request.foglio,
                         sezione=request.sezione,
-                        motivo="Search",
+                        motivo="Esplorazione",
                     )
                 except Exception as e:
                     raise BrowserError(f"Failed to execute EIMM: {e}") from e
@@ -434,6 +462,14 @@ class BrowserManager:
         async with self._page_lock:
             page = await self._get_authenticated_page()
             return await extract_all_sezioni(page, tipo_catasto, max_province)
+
+    async def download_richieste_documents(self) -> list[dict]:
+        """Download all available documents from the SISTER Richieste page."""
+        from .utils import _download_richieste_documents, PageLogger
+        async with self._page_lock:
+            page = await self._get_authenticated_page()
+            page_logger = PageLogger("download_richieste")
+            return await _download_richieste_documents(page, page_logger)
 
     async def close(self):
         """Chiude il browser"""

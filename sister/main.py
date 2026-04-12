@@ -33,7 +33,9 @@ from .models import (  # noqa: F401
     WorkflowInput,
 )
 from .routes import (
+    download_documents,
     execute_workflow,
+    execute_workflow_stream,
     extract_sezioni,
     graceful_shutdown_endpoint,
     health_check,
@@ -211,6 +213,12 @@ try:
     if _static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
+    # Mount outputs directory for screenshots
+    from .database import OUTPUTS_DIR
+    _outputs_dir = Path(OUTPUTS_DIR)
+    _outputs_dir.mkdir(exist_ok=True)
+    app.mount("/outputs", StaticFiles(directory=str(_outputs_dir)), name="outputs")
+
     # Include web routes
     from .web import router as web_router
     app.include_router(web_router)
@@ -277,6 +285,23 @@ async def _execute_workflow(
     _: None = Depends(require_api_key),
 ):
     return await execute_workflow(request, service)
+
+
+@app.post("/visura/workflow/stream")
+async def _execute_workflow_stream(
+    request: WorkflowInput,
+    service: VisuraService = Depends(get_visura_service),
+    _: None = Depends(require_api_key),
+):
+    return await execute_workflow_stream(request, service)
+
+
+@app.post("/visura/download-documents")
+async def _download_documents(
+    service: VisuraService = Depends(get_visura_service),
+    _: None = Depends(require_api_key),
+):
+    return await download_documents(service)
 
 
 @app.post("/visura/ispezione-ipotecaria")

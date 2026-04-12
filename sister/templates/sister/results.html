@@ -3,38 +3,57 @@
 
 {% block content %}
 <div class="container-fluid py-4">
-    <h1 class="mb-4"><i class="fas fa-database text-primary me-2"></i>Results</h1>
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+        <h1 class="mb-0"><i class="fas fa-database text-primary me-2"></i>Results</h1>
+        {% if current_count %}
+        <span class="text-muted small">Showing {{ offset + 1 }}-{{ offset + current_count }} of recent requests</span>
+        {% endif %}
+    </div>
 
     <!-- Stats bar -->
-    <div class="d-flex gap-3 mb-4">
+    <div class="d-flex flex-wrap gap-2 mb-4">
         <span class="badge bg-primary fs-6">{{ stats.total_requests }} requests</span>
         <span class="badge bg-success fs-6">{{ stats.successful }} successful</span>
         <span class="badge bg-danger fs-6">{{ stats.failed }} failed</span>
+        <span class="badge bg-warning text-dark fs-6">{{ stats.pending }} pending</span>
     </div>
 
     <!-- Filter bar -->
     <form class="row g-2 mb-4" method="get" action="/web/results">
         <div class="col-md-3">
+            <label for="filter-provincia" class="form-label form-label-sm mb-1">Provincia</label>
             <input type="text" class="form-control form-control-sm" name="provincia"
-                   placeholder="Filter by provincia" value="{{ provincia or '' }}">
+                   id="filter-provincia" placeholder="e.g. Trieste" value="{{ provincia or '' }}">
         </div>
         <div class="col-md-3">
+            <label for="filter-comune" class="form-label form-label-sm mb-1">Comune</label>
             <input type="text" class="form-control form-control-sm" name="comune"
-                   placeholder="Filter by comune" value="{{ comune or '' }}">
+                   id="filter-comune" placeholder="e.g. TRIESTE" value="{{ comune or '' }}">
         </div>
         <div class="col-md-2">
-            <select class="form-select form-select-sm" name="tipo_catasto">
+            <label for="filter-foglio" class="form-label form-label-sm mb-1">Foglio</label>
+            <input type="text" class="form-control form-control-sm" name="foglio"
+                   id="filter-foglio" placeholder="e.g. 9" value="{{ foglio or '' }}">
+        </div>
+        <div class="col-md-2">
+            <label for="filter-particella" class="form-label form-label-sm mb-1">Particella</label>
+            <input type="text" class="form-control form-control-sm" name="particella"
+                   id="filter-particella" placeholder="e.g. 166" value="{{ particella or '' }}">
+        </div>
+        <div class="col-md-2">
+            <label for="filter-tipo-catasto" class="form-label form-label-sm mb-1">Catasto</label>
+            <select class="form-select form-select-sm" name="tipo_catasto" id="filter-tipo-catasto">
                 <option value="">All types</option>
                 <option value="T" {% if tipo_catasto == 'T' %}selected{% endif %}>Terreni (T)</option>
                 <option value="F" {% if tipo_catasto == 'F' %}selected{% endif %}>Fabbricati (F)</option>
             </select>
         </div>
-        <div class="col-md-2">
+        <div class="col-md-2 d-flex align-items-end">
             <button type="submit" class="btn btn-primary btn-sm w-100">
                 <i class="fas fa-filter me-1"></i>Filter
             </button>
         </div>
-        <div class="col-md-2">
+        <div class="col-md-2 d-flex align-items-end">
             <a href="/web/results" class="btn btn-outline-secondary btn-sm w-100">Clear</a>
         </div>
     </form>
@@ -62,8 +81,8 @@
                 <tr>
                     <td>{{ loop.index + offset }}</td>
                     <td>
-                        <a href="/web/results/{{ r.request_id }}" class="text-decoration-none">
-                            {{ r.request_id[:20] }}...
+                        <a href="/web/results/{{ r.request_id }}" class="text-decoration-none" title="{{ r.request_id }}">
+                            <code>{{ r.request_id[:20] }}{% if r.request_id|length > 20 %}...{% endif %}</code>
                         </a>
                     </td>
                     <td><span class="badge bg-secondary">{{ r.request_type or '-' }}</span></td>
@@ -73,15 +92,20 @@
                     <td>{{ r.foglio or '-' }}</td>
                     <td>{{ r.particella or '-' }}</td>
                     <td>
-                        {% if r.success is true %}
+                        {% if r.status == 'completed' %}
                         <span class="badge bg-success">Completed</span>
-                        {% elif r.success is false %}
+                        {% elif r.status == 'failed' %}
                         <span class="badge bg-danger">Failed</span>
                         {% else %}
-                        <span class="badge bg-warning">Pending</span>
+                        <span class="badge bg-warning text-dark">Pending</span>
                         {% endif %}
                     </td>
-                    <td><small>{{ r.requested_at[:16] if r.requested_at else '-' }}</small></td>
+                    <td>
+                        <small class="d-block">{{ r.requested_at_display or '-' }}</small>
+                        {% if r.responded_at_display %}
+                        <small class="text-muted d-block">Resp. {{ r.responded_at_display }}</small>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -91,14 +115,14 @@
     <!-- Pagination -->
     <nav>
         <ul class="pagination justify-content-center">
-            {% if offset > 0 %}
+            {% if prev_url %}
             <li class="page-item">
-                <a class="page-link" href="/web/results?offset={{ offset - limit }}&limit={{ limit }}{% if provincia %}&provincia={{ provincia }}{% endif %}{% if comune %}&comune={{ comune }}{% endif %}{% if tipo_catasto %}&tipo_catasto={{ tipo_catasto }}{% endif %}">&laquo; Previous</a>
+                <a class="page-link" href="{{ prev_url }}">&laquo; Previous</a>
             </li>
             {% endif %}
-            {% if results|length == limit %}
+            {% if next_url %}
             <li class="page-item">
-                <a class="page-link" href="/web/results?offset={{ offset + limit }}&limit={{ limit }}{% if provincia %}&provincia={{ provincia }}{% endif %}{% if comune %}&comune={{ comune }}{% endif %}{% if tipo_catasto %}&tipo_catasto={{ tipo_catasto }}{% endif %}">Next &raquo;</a>
+                <a class="page-link" href="{{ next_url }}">Next &raquo;</a>
             </li>
             {% endif %}
         </ul>

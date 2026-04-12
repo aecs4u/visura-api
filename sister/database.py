@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -25,6 +26,8 @@ from .db_models import (
     INTESTATO_FIELD_MAP,
     ImmobileDB,
     IntestatoDB,
+    PageVisitDB,
+    VisuraDocumentDB,
     VisuraRequestDB,
     VisuraResponseDB,
     WorkflowRunDB,
@@ -40,6 +43,8 @@ _SISTER_TABLES = [
     IntestatoDB.__table__,
     WorkflowRunDB.__table__,
     WorkflowStepDB.__table__,
+    PageVisitDB.__table__,
+    VisuraDocumentDB.__table__,
 ]
 
 logger = logging.getLogger("sister")
@@ -225,6 +230,35 @@ def _parse_intestati(response_id: str, data: Optional[dict]) -> list[IntestatoDB
     return rows
 
 
+def _parse_page_visits(response_id: str, data: Optional[dict]) -> list[PageVisitDB]:
+    """Parse page_visits from response JSON into structured rows."""
+    if not data or not isinstance(data, dict):
+        return []
+    visits = data.get("page_visits", [])
+    if not isinstance(visits, list):
+        return []
+    rows = []
+    for item in visits:
+        if not isinstance(item, dict):
+            continue
+        ts = None
+        if item.get("timestamp"):
+            try:
+                ts = datetime.fromisoformat(item["timestamp"])
+            except (ValueError, TypeError):
+                pass
+        rows.append(PageVisitDB(
+            response_id=response_id,
+            step=item.get("step", ""),
+            url=item.get("url"),
+            screenshot_url=item.get("screenshot_url"),
+            form_elements_json=json.dumps(item.get("form_elements", []), default=str) if item.get("form_elements") else None,
+            errors_json=json.dumps(item.get("errors", []), default=str) if item.get("errors") else None,
+            timestamp=ts,
+        ))
+    return rows
+
+
 async def save_response(
     request_id: str,
     success: bool,
@@ -236,6 +270,7 @@ async def save_response(
     session_factory = _get_session_factory()
     async with session_factory() as session:
         # Delete existing response + related rows if any (upsert)
+        await session.execute(text("DELETE FROM page_visits WHERE response_id = :rid"), {"rid": request_id})
         await session.execute(text("DELETE FROM intestati WHERE response_id = :rid"), {"rid": request_id})
         await session.execute(text("DELETE FROM immobili WHERE response_id = :rid"), {"rid": request_id})
         await session.execute(text("DELETE FROM visura_responses WHERE request_id = :rid"), {"rid": request_id})
@@ -254,8 +289,43 @@ async def save_response(
             session.add(imm)
         for intest in _parse_intestati(request_id, data):
             session.add(intest)
+        for pv in _parse_page_visits(request_id, data):
+            session.add(pv)
 
         await session.commit()
+
+    # Export to outputs/ directory
+    _export_response_file(request_id, success, tipo_catasto, data, error)
+
+
+OUTPUTS_DIR = os.getenv("SISTER_OUTPUTS_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs"))
+
+
+def _export_response_file(
+    request_id: str,
+    success: bool,
+    tipo_catasto: str,
+    data: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Write response JSON to outputs/ directory."""
+    try:
+        outputs_dir = Path(OUTPUTS_DIR)
+        outputs_dir.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        payload = {
+            "request_id": request_id,
+            "success": success,
+            "tipo_catasto": tipo_catasto,
+            "data": data,
+            "error": error,
+            "exported_at": datetime.now().isoformat(),
+        }
+        filename = f"{request_id}_{ts}.json"
+        (outputs_dir / filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+        logger.info("Response exported to outputs/%s", filename)
+    except Exception as e:
+        logger.warning("Failed to export response file: %s", e)
 
 
 async def get_response(request_id: str) -> Optional[dict]:
@@ -272,6 +342,56 @@ async def get_response(request_id: str) -> Optional[dict]:
             "data": row.data,
             "error": row.error,
             "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+
+
+async def get_result_record(request_id: str) -> Optional[dict]:
+    """Fetch joined request/response data for the web results detail page.
+
+    Returns None only when the request itself does not exist. Requests without a
+    response are returned with ``status='pending'`` so the UI can distinguish
+    pending work from a genuinely unknown request id.
+    """
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        stmt = (
+            select(VisuraRequestDB, VisuraResponseDB)
+            .outerjoin(VisuraResponseDB, VisuraRequestDB.request_id == VisuraResponseDB.request_id)
+            .where(VisuraRequestDB.request_id == request_id)
+        )
+        result = await session.execute(stmt)
+        row = result.one_or_none()
+        if row is None:
+            return None
+
+        req, resp = row
+        status = "pending"
+        if resp is not None:
+            status = "completed" if resp.success else "failed"
+
+        return {
+            "request_id": req.request_id,
+            "request_type": req.request_type,
+            "tipo_catasto": req.tipo_catasto,
+            "provincia": req.provincia,
+            "comune": req.comune,
+            "foglio": req.foglio,
+            "particella": req.particella,
+            "sezione": req.sezione,
+            "subalterno": req.subalterno,
+            "cost_text": req.cost_text,
+            "cost_value": req.cost_value,
+            "requested_at": req.created_at.isoformat() if req.created_at else None,
+            "responded_at": resp.created_at.isoformat() if resp and resp.created_at else None,
+            "success": resp.success if resp else None,
+            "status": status,
+            "data": resp.data if resp else None,
+            "error": resp.error if resp else None,
+            "page_visits": (
+                resp.data.get("page_visits", [])
+                if resp and isinstance(resp.data, dict) and isinstance(resp.data.get("page_visits"), list)
+                else []
+            ),
         }
 
 
@@ -361,6 +481,10 @@ async def cleanup_old_responses(ttl_seconds: int) -> int:
                 await session.delete(req)
 
         await session.commit()
+
+        # Checkpoint WAL so writes flush to the main .sqlite file
+        await session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+
         return deleted
 
 
@@ -389,4 +513,5 @@ async def count_responses() -> dict:
             "total_responses": total_responses,
             "successful": successful,
             "failed": failed,
+            "pending": max(total_requests - total_responses, 0),
         }

@@ -49,6 +49,7 @@ class VisuraRequest:
     foglio: str
     particella: str
     sezione: Optional[str] = None
+    sezione_urbana: Optional[str] = None
     subalterno: Optional[str] = None  # Opzionale: restringe la ricerca per fabbricati
     timestamp: datetime = None
 
@@ -69,6 +70,7 @@ class VisuraIntestatiRequest:
     particella: str
     subalterno: Optional[str] = None
     sezione: Optional[str] = None
+    sezione_urbana: Optional[str] = None
     timestamp: datetime = None
 
     def __post_init__(self):
@@ -112,6 +114,7 @@ class VisuraInput(BaseModel):
     foglio: str = Field(..., min_length=1, description="Numero di foglio")
     particella: str = Field(..., min_length=1, description="Numero di particella")
     sezione: Optional[str] = Field(None, description="Sezione (opzionale)")
+    sezione_urbana: Optional[str] = Field(None, description="Sezione urbana (opzionale, e.g. RA, PA)")
     subalterno: Optional[str] = Field(None, description="Subalterno (opzionale, restringe la ricerca per fabbricati)")
     tipo_catasto: Optional[str] = Field(
         None, pattern=r"^[TF]$", description="'T' = Terreni, 'F' = Fabbricati (se omesso esegue entrambi)"
@@ -135,16 +138,21 @@ class VisuraIntestatiInput(BaseModel):
     comune: str = Field(..., min_length=1, description="Nome del comune")
     foglio: str = Field(..., min_length=1, description="Numero di foglio")
     particella: str = Field(..., min_length=1, description="Numero di particella")
-    tipo_catasto: str = Field(..., pattern=r"^[TF]$", description="'T' = Terreni, 'F' = Fabbricati")
+    tipo_catasto: Optional[str] = Field(
+        None, pattern=r"^[TF]$", description="'T' = Terreni, 'F' = Fabbricati (default T)"
+    )
     subalterno: Optional[str] = Field(None, description="Numero di subalterno (obbligatorio per Fabbricati)")
     sezione: Optional[str] = Field(None, description="Sezione (opzionale)")
+    sezione_urbana: Optional[str] = Field(None, description="Sezione urbana (opzionale, e.g. RA, PA)")
 
     @field_validator("tipo_catasto", mode="before")
     @classmethod
-    def validate_tipo_catasto(cls, value: str) -> str:
+    def validate_tipo_catasto(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
         normalized = value.strip().upper()
         if normalized not in {"T", "F"}:
-            raise ValueError(f"tipo_catasto deve essere 'T' o 'F', ricevuto {value}")
+            return None
         return normalized
 
     @field_validator("subalterno", mode="before")
@@ -554,6 +562,7 @@ class WorkflowInput(BaseModel):
         None, pattern=r"^[TFE]$", description="'T' = Terreni, 'F' = Fabbricati, 'E' = Both"
     )
     sezione: Optional[str] = Field(None, description="Section (optional)")
+    sezione_urbana: Optional[str] = Field(None, description="Urban section (optional, e.g. RA, PA)")
     subalterno: Optional[str] = Field(None, description="Sub-unit (optional)")
     codice_fiscale: Optional[str] = Field(None, description="Codice fiscale")
     identificativo: Optional[str] = Field(None, description="P.IVA or company name")

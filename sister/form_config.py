@@ -97,8 +97,13 @@ _PARTICELLA = EndpointParam(
 )
 
 _SEZIONE = EndpointParam(
-    name="sezione", label="Section", placeholder="Optional",
-    required=False, help_text="Census section (if applicable)",
+    name="sezione", label="Section (Sezione)", placeholder="e.g. A, B, C",
+    required=False, help_text="Census section code for multi-section comuni (e.g. A = RAVENNA, C = SAVIO). Leave blank if not applicable.",
+)
+
+_SEZIONE_URBANA = EndpointParam(
+    name="sezione_urbana", label="Urban Section (Sezione Urbana)", placeholder="e.g. RA",
+    required=False, help_text="2-3 char urban section code for Fabbricati (e.g. RA, PA)",
 )
 
 _SUBALTERNO = EndpointParam(
@@ -134,7 +139,7 @@ SINGLE_STEP_GROUPS: list[FormGroup] = [
         icon="fa-search",
         color="primary",
         category="single",
-        params=[_TIPO_CATASTO, _PROVINCIA, _COMUNE, _SEZIONE, _FOGLIO, _PARTICELLA, _SUBALTERNO],
+        params=[_TIPO_CATASTO, _PROVINCIA, _COMUNE, _SEZIONE, _SEZIONE_URBANA, _FOGLIO, _PARTICELLA, _SUBALTERNO],
         endpoints=[
             EndpointOption(
                 id="visura", name="Property Data",
@@ -475,7 +480,7 @@ WORKFLOW_GROUPS: list[FormGroup] = [
         color="primary",
         category="workflow",
         flowchart="due-diligence",
-        params=[_PRESET_HIDDEN("due-diligence"), _PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO, _SEZIONE, _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM],
+        params=[_PRESET_HIDDEN("due-diligence"), _PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA, _TIPO_CATASTO, _SEZIONE, _SEZIONE_URBANA, _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM],
         endpoints=[EndpointOption(
             id="workflow-due-diligence", name="Due Diligence",
             path="/visura/workflow", method="POST",
@@ -626,7 +631,7 @@ WORKFLOW_GROUPS: list[FormGroup] = [
         flowchart="full-due-diligence",
         params=[
             _PRESET_HIDDEN("full-due-diligence"), _PROVINCIA, _COMUNE, _FOGLIO, _PARTICELLA,
-            _TIPO_CATASTO, _SEZIONE,
+            _TIPO_CATASTO, _SEZIONE, _SEZIONE_URBANA,
             _WORKFLOW_DEPTH, _WORKFLOW_PAID, _WORKFLOW_CONFIRM,
             EndpointParam(
                 name="max_paid_steps", label="Max Paid Steps", placeholder="3",

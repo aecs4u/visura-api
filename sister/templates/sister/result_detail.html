@@ -1,6 +1,61 @@
 {% extends "sister/base.html" %}
 {% block page_title %}Result {{ request_id[:20] }}{% endblock %}
 
+{% macro render_table_section(section, icon='fa-table', color='primary') %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header">
+        <h5 class="mb-0">
+            <i class="fas {{ icon }} text-{{ color }} me-2"></i>{{ section.title }}
+            {% if section.count is defined %}<span class="text-muted">({{ section.count }})</span>{% endif %}
+        </h5>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+                <thead class="table-light">
+                    <tr>
+                        {% for key in section.columns %}
+                        <th>{{ key }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in section.rows %}
+                    <tr>
+                        {% for key in section.columns %}
+                        <td>{{ row.get(key) if row.get(key) not in (None, '') else '-' }}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
+{% macro render_object_section(section, icon='fa-list', color='secondary') %}
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-header">
+        <h5 class="mb-0">
+            <i class="fas {{ icon }} text-{{ color }} me-2"></i>{{ section.title }}
+        </h5>
+    </div>
+    <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+            <tbody>
+                {% for key, value in section["items"] %}
+                <tr>
+                    <th class="w-25 bg-light">{{ key }}</th>
+                    <td>{{ value if value not in (None, '') else '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endmacro %}
+
 {% block content %}
 <div class="container-fluid py-4">
     <nav class="mb-3" aria-label="breadcrumb">
@@ -15,18 +70,24 @@
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header d-flex justify-content-between align-items-center">
             <h4 class="mb-0"><i class="fas fa-info-circle text-primary me-2"></i>Request Details</h4>
-            <span class="badge bg-{{ 'success' if result.success else 'danger' }} fs-6">
-                {{ 'Completed' if result.success else 'Failed' }}
+            <span class="badge bg-{% if result.status == 'completed' %}success{% elif result.status == 'failed' %}danger{% else %}warning text-dark{% endif %} fs-6">
+                {% if result.status == 'completed' %}Completed{% elif result.status == 'failed' %}Failed{% else %}Pending{% endif %}
             </span>
         </div>
         <div class="card-body">
             <div class="row">
                 <div class="col-md-6">
                     <p><strong>Request ID:</strong> <code>{{ result.request_id }}</code></p>
-                    <p><strong>Type:</strong> {{ result.tipo_catasto }}</p>
-                    <p><strong>Created:</strong> {{ result.created_at }}</p>
+                    <p><strong>Request Type:</strong> {{ result.request_type or '-' }}</p>
+                    <p><strong>Catasto:</strong> {{ result.tipo_catasto or '-' }}</p>
+                    <p><strong>Requested:</strong> {{ result.requested_at_display or '-' }}</p>
+                    <p><strong>Responded:</strong> {{ result.responded_at_display or '-' }}</p>
                 </div>
                 <div class="col-md-6">
+                    <p><strong>Provincia:</strong> {{ result.provincia or '-' }}</p>
+                    <p><strong>Comune:</strong> {{ result.comune or '-' }}</p>
+                    <p><strong>Foglio / Particella:</strong> {{ result.foglio or '-' }} / {{ result.particella or '-' }}</p>
+                    <p><strong>Sezione / Subalterno:</strong> {{ result.sezione or '-' }} / {{ result.subalterno or '-' }}</p>
                     {% if result.error %}
                     <div class="alert alert-danger">
                         <i class="fas fa-exclamation-triangle me-2"></i>{{ result.error }}
@@ -37,62 +98,83 @@
         </div>
     </div>
 
-    {% if result.data %}
-    {% set data = result.data %}
-
-    <!-- Immobili table -->
-    {% if data.immobili is defined and data.immobili %}
+    {% if result.status == 'pending' %}
+    <div class="alert alert-info border-0 shadow-sm">
+        <i class="fas fa-hourglass-half me-2"></i>
+        This request exists but no response has been stored yet. Check back later.
+    </div>
+    {% elif result.data %}
+    {% for section in result.sections %}
+        {% if section.kind == 'table' %}
+            {% if section.name == 'immobili' %}
+                {{ render_table_section(section, 'fa-home', 'success') }}
+            {% elif section.name == 'intestati' %}
+                {{ render_table_section(section, 'fa-users', 'info') }}
+            {% else %}
+                {{ render_table_section(section, 'fa-table', 'primary') }}
+            {% endif %}
+        {% elif section.kind == 'object' %}
+            {{ render_object_section(section, 'fa-list', 'secondary') }}
+        {% elif section.kind == 'list' %}
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header">
-            <h5 class="mb-0"><i class="fas fa-home text-success me-2"></i>Immobili ({{ data.immobili|length }})</h5>
+            <h5 class="mb-0"><i class="fas fa-list text-secondary me-2"></i>{{ section.title }}</h5>
         </div>
-        <div class="card-body p-0">
-            <div class="table-responsive">
-                <table class="table table-sm table-hover mb-0">
-                    <thead class="table-light">
-                        <tr>
-                            {% for key in data.immobili[0].keys() %}
-                            <th>{{ key }}</th>
-                            {% endfor %}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for row in data.immobili %}
-                        <tr>
-                            {% for val in row.values() %}
-                            <td>{{ val }}</td>
-                            {% endfor %}
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
+        <div class="card-body">
+            <ul class="mb-0">
+                {% for item in section["items"] %}
+                <li>{{ item }}</li>
+                {% endfor %}
+            </ul>
         </div>
     </div>
-    {% endif %}
-
-    <!-- Intestati table -->
-    {% if data.intestati is defined and data.intestati %}
+        {% elif section.kind == 'value' %}
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header">
-            <h5 class="mb-0"><i class="fas fa-users text-info me-2"></i>Intestati ({{ data.intestati|length }})</h5>
+            <h5 class="mb-0"><i class="fas fa-tag text-secondary me-2"></i>{{ section.title }}</h5>
+        </div>
+        <div class="card-body">
+            <p class="mb-0">{{ section.value if section.value not in (None, '') else '-' }}</p>
+        </div>
+    </div>
+        {% endif %}
+    {% endfor %}
+
+    {% if result.page_visits %}
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header">
+            <h5 class="mb-0"><i class="fas fa-route text-warning me-2"></i>Page Visits ({{ result.page_visits|length }})</h5>
         </div>
         <div class="card-body p-0">
             <div class="table-responsive">
                 <table class="table table-sm table-hover mb-0">
                     <thead class="table-light">
                         <tr>
-                            {% for key in data.intestati[0].keys() %}
-                            <th>{{ key }}</th>
-                            {% endfor %}
+                            <th>Step</th>
+                            <th>URL</th>
+                            <th>Timestamp</th>
+                            <th>Errors</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for row in data.intestati %}
+                        {% for visit in result.page_visits %}
                         <tr>
-                            {% for val in row.values() %}
-                            <td>{{ val }}</td>
-                            {% endfor %}
+                            <td>{{ visit.step or '-' }}</td>
+                            <td>
+                                {% if visit.url %}
+                                <a href="{{ visit.url }}" target="_blank" rel="noreferrer">{{ visit.url }}</a>
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                            <td>{{ visit.timestamp or '-' }}</td>
+                            <td>
+                                {% if visit.errors %}
+                                {{ visit.errors|join(', ') }}
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -115,7 +197,7 @@
         </div>
         <div class="collapse" id="raw-json">
             <div class="card-body">
-                <pre class="bg-dark text-light p-3 rounded" style="max-height: 500px; overflow-y: auto;">{{ data | tojson(indent=2) }}</pre>
+                <pre class="bg-dark text-light p-3 rounded" style="max-height: 500px; overflow-y: auto;">{{ result.data | tojson(indent=2) }}</pre>
             </div>
         </div>
     </div>
@@ -124,7 +206,7 @@
     {% else %}
     <div class="alert alert-warning">
         <i class="fas fa-exclamation-triangle me-2"></i>
-        Result not found for request ID <code>{{ request_id }}</code>.
+        Request not found for ID <code>{{ request_id }}</code>.
     </div>
     <a href="/web/results" class="btn btn-primary">Back to Results</a>
     {% endif %}

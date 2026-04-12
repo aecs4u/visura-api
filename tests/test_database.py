@@ -22,6 +22,7 @@ async def _fresh_db(tmp_path, monkeypatch):
     """Point the database module at a fresh temp file for each test."""
     db_path = str(tmp_path / "test_sister.sqlite")
     monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "OUTPUTS_DIR", str(tmp_path / "outputs"))
     # Reset the cached engine so it picks up the new path
     database._engine = None
     await database.init_db()
@@ -193,6 +194,58 @@ async def test_save_and_get_response():
 
 
 @pytest.mark.asyncio
+async def test_get_result_record_includes_request_metadata_and_status():
+    await database.save_request(
+        request_id="req_F_detail",
+        request_type="visura",
+        tipo_catasto="F",
+        provincia="Trieste",
+        comune="TRIESTE",
+        foglio="9",
+        particella="166",
+        sezione="A",
+        subalterno="3",
+    )
+
+    await database.save_response(
+        request_id="req_F_detail",
+        success=True,
+        tipo_catasto="F",
+        data={"immobili": [{"Foglio": "9"}], "page_visits": [{"step": "search", "url": "/foo"}]},
+    )
+
+    result = await database.get_result_record("req_F_detail")
+
+    assert result is not None
+    assert result["status"] == "completed"
+    assert result["request_type"] == "visura"
+    assert result["provincia"] == "Trieste"
+    assert result["sezione"] == "A"
+    assert result["subalterno"] == "3"
+    assert result["page_visits"][0]["step"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_get_result_record_returns_pending_for_request_without_response():
+    await database.save_request(
+        request_id="req_pending",
+        request_type="visura",
+        tipo_catasto="T",
+        provincia="Roma",
+        comune="ROMA",
+        foglio="1",
+        particella="2",
+    )
+
+    result = await database.get_result_record("req_pending")
+
+    assert result is not None
+    assert result["status"] == "pending"
+    assert result["success"] is None
+    assert result["data"] is None
+
+
+@pytest.mark.asyncio
 async def test_save_response_with_error():
     await database.save_request(
         request_id="req_F_err",
@@ -222,6 +275,12 @@ async def test_save_response_with_error():
 @pytest.mark.asyncio
 async def test_get_response_returns_none_for_missing():
     result = await database.get_response("nonexistent_id")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_result_record_returns_none_for_missing():
+    result = await database.get_result_record("nonexistent_id")
     assert result is None
 
 
@@ -392,6 +451,7 @@ async def test_count_responses_empty():
     assert stats["total_responses"] == 0
     assert stats["successful"] == 0
     assert stats["failed"] == 0
+    assert stats["pending"] == 0
 
 
 @pytest.mark.asyncio
@@ -402,3 +462,22 @@ async def test_count_responses_with_data():
     assert stats["total_responses"] == 3
     assert stats["successful"] == 3
     assert stats["failed"] == 0
+    assert stats["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_count_responses_includes_pending_requests():
+    await database.save_request(
+        request_id="req_pending_stats",
+        request_type="visura",
+        tipo_catasto="T",
+        provincia="Roma",
+        comune="ROMA",
+        foglio="1",
+        particella="9",
+    )
+
+    stats = await database.count_responses()
+    assert stats["total_requests"] == 1
+    assert stats["total_responses"] == 0
+    assert stats["pending"] == 1

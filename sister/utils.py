@@ -1,12 +1,131 @@
 import asyncio
 import logging
+import os
+import re
 import time
+from datetime import datetime
 
-from aecs4u_auth.browser import PageLogger
+from aecs4u_auth.browser import PageLogger as _BasePageLogger
 from bs4 import BeautifulSoup
 from playwright.async_api import Page
 
 log = logging.getLogger("sister.utils")
+
+
+
+class PageLogger(_BasePageLogger):
+    """Extended PageLogger that saves screenshots and collects page visit metadata."""
+
+    def __init__(self, flow_name: str, base_dir: str = "logs/pages") -> None:
+        super().__init__(flow_name, base_dir)
+        self.page_visits: list[dict] = []
+
+    async def log(self, page: Page, step_name: str) -> None:
+        await super().log(page, step_name)
+        screenshot_url = None
+        try:
+            from .database import OUTPUTS_DIR
+            if page and not page.is_closed():
+                pages_dir = os.path.join(OUTPUTS_DIR, "pages", _BasePageLogger._session_id or "unknown")
+                os.makedirs(pages_dir, exist_ok=True)
+                safe_name = re.sub(r"[^\w\-]", "_", step_name)
+                filename = f"{self.step:02d}_{self.flow_name}_{safe_name}.png"
+                filepath = os.path.join(pages_dir, filename)
+                await asyncio.wait_for(page.screenshot(path=filepath, full_page=True), timeout=10)
+                screenshot_url = f"/outputs/pages/{_BasePageLogger._session_id or 'unknown'}/{filename}"
+        except Exception as e:
+            log.debug("Screenshot save failed: %s", e)
+
+        # Collect page metadata for response
+        try:
+            if page and not page.is_closed():
+                visit = await asyncio.wait_for(
+                    _collect_page_metadata(page, step_name, screenshot_url), timeout=10
+                )
+                self.page_visits.append(visit)
+        except Exception as e:
+            log.debug("Page metadata collection failed: %s", e)
+            self.page_visits.append({"step": step_name, "url": page.url if page else "", "timestamp": datetime.now().isoformat(), "screenshot_url": screenshot_url, "form_elements": [], "errors": []})
+
+
+async def _collect_page_metadata(page: Page, step_name: str, screenshot_url: str | None = None) -> dict:
+    """Extract form elements and metadata from the current page."""
+    url = page.url
+    form_elements = []
+
+    try:
+        # Extract all visible form inputs, selects, textareas
+        elements = await page.evaluate("""() => {
+            const els = [];
+            const forms = document.querySelectorAll('form');
+            for (const form of forms) {
+                const formName = form.getAttribute('name') || form.getAttribute('id') || '';
+                if (formName === 'formricerca') continue;  // skip search bar
+
+                for (const el of form.elements) {
+                    if (el.type === 'hidden') continue;
+                    if (el.type === 'radio' && !el.checked) continue;
+                    const tag = el.tagName.toLowerCase();
+                    const entry = {
+                        tag: tag,
+                        type: el.type || '',
+                        name: el.name || '',
+                        label: '',
+                        value: '',
+                    };
+                    // Get value
+                    if (tag === 'select') {
+                        const opt = el.options[el.selectedIndex];
+                        entry.value = opt ? opt.text.trim() + ' (' + opt.value + ')' : '';
+                    } else if (el.type === 'radio' || el.type === 'checkbox') {
+                        entry.value = el.checked ? el.value + ' [checked]' : el.value;
+                    } else if (el.type === 'submit') {
+                        entry.value = el.value;
+                    } else {
+                        entry.value = el.value || '';
+                    }
+                    // Find associated label
+                    const id = el.id || el.name;
+                    if (id) {
+                        const lbl = document.querySelector('label[for="' + id + '"]');
+                        if (lbl) entry.label = lbl.textContent.trim();
+                    }
+                    if (!entry.label) {
+                        const td = el.closest('td');
+                        if (td && td.previousElementSibling) {
+                            const prevLabel = td.previousElementSibling.querySelector('label');
+                            if (prevLabel) entry.label = prevLabel.textContent.trim();
+                        }
+                    }
+                    els.push(entry);
+                }
+            }
+            return els;
+        }""")
+        form_elements = elements or []
+    except Exception as e:
+        log.debug("Form element extraction failed: %s", e)
+
+    # Check for error messages on page
+    errors = []
+    try:
+        error_divs = page.locator(".errore_txt, .errore, .alert-danger, .error")
+        count = await error_divs.count()
+        for i in range(min(count, 5)):
+            txt = (await error_divs.nth(i).inner_text()).strip()
+            if txt:
+                errors.append(txt)
+    except Exception:
+        pass
+
+    return {
+        "step": step_name,
+        "url": url,
+        "timestamp": datetime.now().isoformat(),
+        "screenshot_url": screenshot_url,
+        "form_elements": form_elements,
+        "errors": errors,
+    }
 
 SISTER_SCELTA_SERVIZIO_URL = "https://sister3.agenziaentrate.gov.it/Visure/SceltaServizio.do?tipo=/T/TM/VCVC_"
 
@@ -187,6 +306,94 @@ async def find_best_option_match(page, selector, search_text):
     return best_match
 
 
+async def _wait_for_captcha(page, timeout: int = 120):
+    """Detect and wait for the user to solve a CAPTCHA if present.
+
+    Handles two types:
+    1. SISTER-native CAPTCHA: img#imgCaptcha + input[name='inCaptchaChars']
+       → waits for the user to fill the code and submit (page navigates away)
+    2. Generic reCAPTCHA/hCaptcha iframes
+       → waits for the element to disappear
+    """
+    # SISTER-native CAPTCHA
+    captcha_input = page.locator("input[name='inCaptchaChars']")
+    if await captcha_input.count() > 0:
+        current_url = page.url
+        log.warning("CAPTCHA SISTER rilevato — in attesa che l'utente inserisca il codice (timeout %ds)...", timeout)
+        try:
+            # Wait for the page to navigate away (user solved CAPTCHA and form submitted)
+            await page.wait_for_url(lambda url: url != current_url, timeout=timeout * 1000)
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            log.info("CAPTCHA SISTER risolto, pagina navigata a: %s", page.url)
+        except Exception:
+            log.warning("Timeout attesa CAPTCHA SISTER — proseguendo comunque")
+        return True
+
+    # Generic CAPTCHA (reCAPTCHA, hCaptcha, etc.)
+    generic_selectors = [
+        "iframe[src*='recaptcha']",
+        "iframe[src*='hcaptcha']",
+        ".g-recaptcha",
+        ".h-captcha",
+    ]
+    for selector in generic_selectors:
+        if await page.locator(selector).count() > 0:
+            log.warning("CAPTCHA rilevato — in attesa che l'utente lo risolva (timeout %ds)...", timeout)
+            try:
+                await page.locator(selector).first.wait_for(state="hidden", timeout=timeout * 1000)
+                log.info("CAPTCHA risolto, riprendendo...")
+                await page.wait_for_load_state("networkidle", timeout=30000)
+            except Exception:
+                log.warning("Timeout attesa CAPTCHA — proseguendo comunque")
+            return True
+    return False
+
+
+async def _select_sezione(page, comune: str, sezione=None):
+    """Select the sezione dropdown only when explicitly requested.
+
+    Only interacts with the sezione dropdown if a sezione value was provided.
+    Does NOT click 'scegli la sezione' or modify the dropdown otherwise.
+
+    Returns the selected sezione value, or None.
+    """
+    if not sezione:
+        return None
+
+    sezione_select = page.locator("select[name='sezione']")
+    sezione_options = await sezione_select.locator("option").all()
+
+    # If dropdown is empty, click "scegli la sezione" to load options
+    if not sezione_options:
+        try:
+            sel_btn = page.locator("input[name='selSezione'][value='scegli la sezione']")
+            if await sel_btn.count() > 0:
+                await sel_btn.click()
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                sezione_options = await sezione_select.locator("option").all()
+        except Exception:
+            pass
+
+    if not sezione_options:
+        log.warning("Sezione '%s' richiesta ma nessuna sezione disponibile per '%s'", sezione, comune)
+        return None
+
+    sezione_value = await find_best_option_match(page, "select[name='sezione']", sezione)
+    if sezione_value:
+        log.info("Sezione: [cyan]%s[/cyan]", sezione_value)
+        await sezione_select.select_option(sezione_value)
+        return sezione_value
+
+    available = []
+    for option in sezione_options:
+        value = await option.get_attribute("value")
+        text_content = await option.inner_text()
+        if value and text_content:
+            available.append(f"{text_content.strip()} ({value})")
+    log.warning("Sezione '%s' non trovata. Disponibili: %s", sezione, ", ".join(available))
+    return None
+
+
 async def run_visura(
     page,
     provincia="Trieste",
@@ -197,6 +404,7 @@ async def run_visura(
     tipo_catasto="T",
     extract_intestati=True,
     subalterno=None,
+    sezione_urbana=None,
 ):
     time0 = time.time()
     page_logger = PageLogger("visura")
@@ -279,31 +487,14 @@ async def run_visura(
     except Exception as e:
         raise Exception(f"Errore selezione comune '{comune_value}': {e}")
 
-    # IMPORTANTE: Selezionare sezione solo se specificata (non None e non "_")
-    if sezione:
-        log.info("Selezionando sezione: [cyan]%s[/cyan]", sezione)
-        await page.locator("input[name='selSezione'][value='scegli la sezione']").click()
-        await page.wait_for_load_state("networkidle", timeout=30000)
+    await _select_sezione(page, comune, sezione)
 
-        options = await page.locator("select[name='sezione'] option").all()
-        available_sections = []
-        for option in options:
-            value = await option.get_attribute("value")
-            text = await option.inner_text()
-            if value and text:
-                available_sections.append(f"{text} ({value})")
-
-        if not available_sections:
-            log.warning("Nessuna sezione disponibile per '%s', skip", comune)
-        else:
-            sezione_value = await find_best_option_match(page, "select[name='sezione']", sezione)
-            if not sezione_value:
-                log.warning("Sezione '%s' non trovata. Disponibili: %s", sezione, ", ".join(available_sections))
-            else:
-                try:
-                    await page.locator("select[name='sezione']").select_option(sezione_value)
-                except Exception as e:
-                    log.warning("Errore selezione sezione '%s': %s", sezione_value, e)
+    # Fill "Sezione urbana" — only when explicitly provided (separate from dropdown sezione)
+    if sezione_urbana:
+        sez_urb_field = page.locator("input[name='sezUrb']")
+        if await sez_urb_field.count() > 0:
+            await sez_urb_field.fill(str(sezione_urbana).upper())
+            log.info("Sezione urbana: [cyan]%s[/cyan]", sezione_urbana)
 
     # Inserisci foglio, particella, subalterno
     log.info("Foglio: [cyan]%s[/cyan]  Particella: [cyan]%s[/cyan]%s", foglio, particella, f"  Sub: [cyan]{subalterno}[/cyan]" if subalterno else "")
@@ -314,17 +505,21 @@ async def run_visura(
     if subalterno:
         await page.locator("input[name='subalterno1']").fill(str(subalterno))
 
+    await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
+    await page_logger.log(page, "form_compilato")
+
     # Clicca Ricerca
     log.info("Esecuzione ricerca...")
     await page.locator("input[name='scelta'][value='Ricerca']").click()
     await page.wait_for_load_state("networkidle", timeout=30000)
+    await _wait_for_captcha(page)
     await page_logger.log(page, "ricerca")
 
     # STEP 3: Gestisci conferma assenza subalterno (se necessario)
     try:
         conferma_button = page.locator("input[name='confAssSub'][value='Conferma']")
         if await conferma_button.count() > 0:
-            log.debug("Conferma assenza subalterno richiesta")
+            log.warning("Confermi Assenza Subalterno — confermando automaticamente")
             await conferma_button.click()
             await page.wait_for_load_state("networkidle", timeout=30000)
             await page_logger.log(page, "conferma_subalterno")
@@ -344,6 +539,7 @@ async def run_visura(
             "total_results": 0,
             "intestati": [],
             "error": "NESSUNA CORRISPONDENZA TROVATA",
+            "page_visits": page_logger.page_visits,
         }
 
     # STEP 4: Estrazione tabella Elenco Immobili
@@ -391,8 +587,12 @@ async def run_visura(
         log.error("Errore estrazione immobili: %s", e)
         immobili = []
 
-    # Se non servono intestati, la tabella immobili è tutto ciò che serve
-    if not extract_intestati:
+    # Check if we're on the AssenzaSubalterno page with radio buttons
+    radio_buttons_check = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+    has_radio_list = await radio_buttons_check.count() > 0
+
+    # Se non servono intestati E non siamo sulla pagina con lista immobili
+    if not extract_intestati and not has_radio_list:
         elapsed = time.time() - time0
         log.info("[green]Visura completata[/green] in %.1fs — %d immobili", elapsed, len(immobili))
         return {
@@ -400,106 +600,585 @@ async def run_visura(
             "results": [],
             "total_results": len(immobili),
             "intestati": [],
+            "page_visits": page_logger.page_visits,
         }
 
-    # STEP 5: Estrai intestati (solo quando extract_intestati=True)
-    log.info("Estraendo intestati...")
-    intestati = []
+    # STEP 5: Estrai intestati e visure per immobile
+    log.info("Estraendo intestati e visure per immobile...")
+    all_intestati = []
+    results_list = []
+    skipped_soppresso = 0
+
+    # Re-fill richiedente/motivo/sezUrb on results page (SISTER clears them after submit)
+    await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
 
     try:
-        intestati_button_selectors = [
-            "input[name='intestati'][value='Intestati']",
-            "input[value='Intestati']",
-            "input[name='intestati']",
-            "button:has-text('Intestati')",
-            "input[type='submit'][value*='ntestat']",
-            "*[value='Intestati']",
-        ]
+        # Check if there are radio buttons (multiple immobili)
+        radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+        radio_count = await radio_buttons.count()
 
-        intestati_button = None
-        for selector in intestati_button_selectors:
-            try:
-                locator = page.locator(selector)
-                if await locator.count() > 0:
-                    intestati_button = locator.first
-                    log.debug("Bottone Intestati trovato: %s", selector)
-                    break
-            except Exception as e:
-                log.debug("Selettore Intestati '%s' fallito: %s", selector, e)
-                continue
-
-        if intestati_button:
-            await intestati_button.click()
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await page_logger.log(page, "intestati")
-
-            intestati_selectors = [
-                "table.listaIsp4",
-                "table[class*='lista']",
-                "table:has(th:text('Nominativo o denominazione'))",
-                "table:has(th:text('Codice fiscale'))",
-                "table:has(th:text('Titolarità'))",
-                "table:has(th:text('Cognome'))",
-                "table:has(th:text('Nome'))",
-                "table",
-            ]
-
-            for selector in intestati_selectors:
-                try:
-                    intestati_table = page.locator(selector)
-                    count = await intestati_table.count()
-
-                    if count > 0:
-                        for i in range(count):
-                            try:
-                                table_elem = intestati_table.nth(i)
-                                intestati_html = await table_elem.inner_html(timeout=10000)
-
-                                if (
-                                    "Cognome" in intestati_html
-                                    or "Nome" in intestati_html
-                                    or "Soggetto" in intestati_html
-                                    or "Nominativo o denominazione" in intestati_html
-                                    or "Codice fiscale" in intestati_html
-                                    or "Titolarità" in intestati_html
-                                ):
-                                    intestati = parse_table(intestati_html)
-                                    log.info("[green]%d intestati[/green] estratti", len(intestati))
-                                    break
-                                else:
-                                    temp_intestati = parse_table(intestati_html)
-                                    if temp_intestati and len(temp_intestati) > 0:
-                                        if "Foglio" not in intestati_html and "Particella" not in intestati_html:
-                                            intestati = temp_intestati
-                                            log.info("[green]%d intestati[/green] estratti (fallback)", len(intestati))
-                                            break
-                            except Exception as e:
-                                log.debug("Errore tabella intestati %d: %s", i, e)
-                                continue
-
-                        if intestati:
-                            break
-
-                except Exception as e:
-                    log.debug("Errore selettore intestati '%s': %s", selector, e)
-                    continue
+        if radio_count > 0:
+            # Build list of active radio indices, classifying each
+            active_indices = []
+            bene_comune_indices = set()
+            for i in range(radio_count):
+                val = await radio_buttons.nth(i).get_attribute("value") or ""
+                if "Soppress" in val:
+                    skipped_soppresso += 1
+                else:
+                    active_indices.append(i)
+                    if "Bene comune" in val:
+                        bene_comune_indices.add(i)
+            skipped_bene_comune = len(bene_comune_indices)
+            if skipped_soppresso:
+                log.info("Saltati %d immobili soppressi su %d totali", skipped_soppresso, radio_count)
+            if skipped_bene_comune:
+                log.info("Trovati %d 'Bene comune non censibile' — intestati saltati per questi", skipped_bene_comune)
+            log.info("Iterando per %d immobili attivi", len(active_indices))
         else:
-            log.warning("Bottone Intestati non trovato")
+            active_indices = []
+            bene_comune_indices = set()
+
+        processed = 0
+        for radio_idx in active_indices:
+            imm_data = immobili[radio_idx] if radio_idx < len(immobili) else {}
+            is_bene_comune = radio_idx in bene_comune_indices
+            step_result = {"result_index": radio_idx + 1, "immobile": imm_data, "intestati": [], "visura": None}
+
+            # Select the radio button
+            radio = radio_buttons.nth(radio_idx)
+            await radio.click()
+            log.info("Selezionato immobile %d/%d (radio %d)%s", processed + 1, len(active_indices), radio_idx + 1,
+                     " [Bene comune — skip intestati]" if is_bene_comune else "")
+
+            # --- Click "Intestati" (skip for Bene comune non censibile) ---
+            intestati_btn = page.locator("input[name='intestati'][value='Intestati']")
+            if not is_bene_comune and await intestati_btn.count() > 0:
+                await intestati_btn.click()
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await page_logger.log(page, f"intestati_{radio_idx + 1}")
+
+                # Extract intestati using Playwright locators
+                step_intestati = await _extract_intestati_playwright(page)
+                log.info("[green]%d intestati[/green] per immobile (radio %d)", len(step_intestati), radio_idx + 1)
+                all_intestati.extend(step_intestati)
+                step_result["intestati"] = step_intestati
+
+                # --- Click "Visura per Soggetto" (deferred PDF request) ---
+                visura_sogg_btn = page.locator("input[name='visura'][value='Visura per Soggetto']")
+                if await visura_sogg_btn.count() > 0:
+                    await visura_sogg_btn.click()
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+
+                    # Set default options: Storica Analitica, XML, differita
+                    await _set_visura_form_defaults(page)
+                    await page_logger.log(page, f"visura_soggetto_{radio_idx + 1}")
+
+                    # Extract data from the visura form page
+                    visura_sogg_data = await _extract_visura_immobile_playwright(page)
+                    step_result["visura_soggetto"] = visura_sogg_data
+
+                    # Wait for CAPTCHA → user fills code → form submits
+                    has_captcha = await _wait_for_captcha(page)
+                    if not has_captcha:
+                        inoltra_btn = page.locator("input[name='inoltra'][value='Inoltra'], input[type='submit'][value='Inoltra']")
+                        if await inoltra_btn.count() > 0:
+                            await inoltra_btn.click()
+                            await page.wait_for_load_state("networkidle", timeout=30000)
+
+                    await page_logger.log(page, f"visura_soggetto_inoltrata_{radio_idx + 1}")
+                    log.info("Visura per Soggetto inoltrata per radio %d", radio_idx + 1)
+
+                    # Go back to immobili list (may need multiple backs)
+                    await _navigate_back_to_immobili_list(page)
+                else:
+                    # No "Visura per Soggetto" button — go back from intestati page
+                    await _navigate_back_to_immobili_list(page)
+
+                # Re-select the same radio for the next action
+                radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+                radio = radio_buttons.nth(radio_idx)
+                await radio.click()
+
+            # --- Click "Visura Per Immobile" ---
+            visura_btn = page.locator("input[name='visuraImm'][value='Visura Per Immobile']")
+            if await visura_btn.count() > 0:
+                await visura_btn.click()
+                await page.wait_for_load_state("networkidle", timeout=30000)
+
+                # Set default options: Storica Analitica, XML, differita
+                await _set_visura_form_defaults(page)
+                await page_logger.log(page, f"visura_immobile_{radio_idx + 1}")
+
+                # Extract visura data from the form page before submitting
+                visura_data = await _extract_visura_immobile_playwright(page)
+                step_result["visura"] = visura_data
+
+                # Wait for user to solve CAPTCHA (fills inCaptchaChars → form auto-submits)
+                has_captcha = await _wait_for_captcha(page)
+
+                if not has_captcha:
+                    # No CAPTCHA — click Inoltra manually
+                    inoltra_btn = page.locator("input[name='inoltra'][value='Inoltra'], input[type='submit'][value='Inoltra']")
+                    if await inoltra_btn.count() > 0:
+                        await inoltra_btn.click()
+                        await page.wait_for_load_state("networkidle", timeout=30000)
+
+                await page_logger.log(page, f"visura_inoltrata_{radio_idx + 1}")
+                log.info("Visura Per Immobile inoltrata per radio %d", radio_idx + 1)
+
+                # Go back to immobili list (may need multiple backs)
+                await _navigate_back_to_immobili_list(page)
+
+                # Re-acquire radio buttons (DOM may have changed after navigation)
+                radio_buttons = page.locator("input[type='radio'][property='visImmSel'], input[type='radio'][name='visImmSel']")
+
+            await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
+            results_list.append(step_result)
+            processed += 1
 
     except Exception as e:
-        log.error("Errore estrazione intestati: %s", e)
+        log.error("Errore estrazione intestati/visure: %s", e)
+
+    if not results_list and immobili:
+        results_list = [{"result_index": 1, "immobile": immobili[0] if immobili else {}, "intestati": all_intestati}]
+
+    # --- Download PDFs from Richieste page ---
+    downloaded_pdfs = []
+    if extract_intestati and results_list:
+        try:
+            downloaded_pdfs = await _download_richieste_documents(page, page_logger)
+        except Exception as e:
+            log.warning("Errore download PDF da Richieste: %s", e)
 
     elapsed = time.time() - time0
-    log.info("[green]Visura completata[/green] in %.1fs — %d immobili, %d intestati", elapsed, len(immobili), len(intestati))
+    log.info("[green]Visura completata[/green] in %.1fs — %d immobili, %d intestati, %d soppressi saltati, %d PDF scaricati",
+             elapsed, len(immobili), len(all_intestati), skipped_soppresso, len(downloaded_pdfs))
 
     result = {
         "immobili": immobili,
-        "results": [{"result_index": 1, "immobile": immobili[0] if immobili else {}, "intestati": intestati}],
+        "results": results_list,
         "total_results": len(immobili),
-        "intestati": intestati,
+        "intestati": all_intestati,
+        "skipped_soppresso": skipped_soppresso,
+        "downloaded_pdfs": downloaded_pdfs,
+        "page_visits": page_logger.page_visits,
     }
 
     return result
+
+
+async def _navigate_back_to_immobili_list(page):
+    """Navigate back to the immobili list (AssenzaSubalterno.do) from any sub-page.
+
+    Handles various "Indietro" / "Back" buttons with different names:
+      - input[name='indietro'] — standard back button
+      - input[name='annullaConf'] — back from InoltraRichiestaVis.do confirmation
+      - form action pointing to AssenzaSubalterno.do
+    """
+    for _attempt in range(5):
+        if "AssenzaSubalterno" in page.url or "SceltaVisuraImmSogg" in page.url:
+            break
+
+        # Try all known back button selectors
+        back_btn = page.locator(
+            "input[name='indietro'][value='Indietro'], "
+            "input[name='annullaConf'][value='Indietro'], "
+            "form[action*='AssenzaSubalterno'] input[type='submit']"
+        )
+        if await back_btn.count() > 0:
+            await back_btn.first.click()
+            await page.wait_for_load_state("networkidle", timeout=30000)
+        else:
+            log.warning("Nessun bottone Indietro trovato su %s", page.url)
+            break
+
+
+async def _set_visura_form_defaults(page):
+    """Set default options on the SceltaVisuraImmSogg form.
+
+    Defaults:
+      - Storica: Analitica (tipoVisura=3)
+      - Formato documento: XML (tipoDocFornitura=XML)
+      - richiesta in differita: checked (differita=1)
+    """
+    # Storica → Analitica (value=3)
+    analitica_radio = page.locator("input[name='tipoVisura'][value='3']")
+    if await analitica_radio.count() > 0:
+        await analitica_radio.click()
+        log.info("Tipo visura: Storica Analitica")
+
+    # Formato documento → XML
+    xml_radio = page.locator("input[name='tipoDocFornitura'][value='XML']")
+    if await xml_radio.count() > 0:
+        await xml_radio.click()
+        log.info("Formato documento: XML")
+
+    # richiesta in differita → checked
+    differita_cb = page.locator("input[name='differita']")
+    if await differita_cb.count() > 0 and not await differita_cb.is_checked():
+        await differita_cb.click()
+        log.info("Richiesta in differita: selezionata")
+
+
+async def _download_richieste_documents(page, page_logger) -> list[dict]:
+    """Navigate to the Richieste page and download all available documents.
+
+    Downloads PDF, XML, and P7M files from the "salva" column.
+    Parses XML files to extract structured data.
+    Persists documents to the visura_documents table.
+
+    Returns a list of dicts with download info.
+    """
+    from .database import OUTPUTS_DIR
+
+    # Find the Richieste link on the current page (opens in popup, so we use goto)
+    richieste_link = page.locator("a:has-text('Richieste')")
+    if await richieste_link.count() == 0:
+        await _navigate_to_scelta_servizio(page, page_logger)
+        richieste_link = page.locator("a:has-text('Richieste')")
+
+    if await richieste_link.count() == 0:
+        log.warning("Link Richieste non trovato")
+        return []
+
+    href = await richieste_link.get_attribute("href")
+    if not href:
+        log.warning("Link Richieste senza href")
+        return []
+
+    if not href.startswith("http"):
+        href = "https://sister3.agenziaentrate.gov.it" + href
+    await page.goto(href, timeout=30000)
+    await page.wait_for_load_state("networkidle", timeout=30000)
+    await page_logger.log(page, "richieste")
+
+    # Extract table rows from the Richieste page
+    rows = page.locator("table tr").filter(has=page.locator("td"))
+    row_count = await rows.count()
+    log.info("Righe Richieste trovate: %d", row_count)
+
+    docs_dir = os.path.join(OUTPUTS_DIR, "documents")
+    os.makedirs(docs_dir, exist_ok=True)
+
+    downloaded = []
+
+    for i in range(row_count):
+        row = rows.nth(i)
+        cells = row.locator("td")
+        cell_count = await cells.count()
+        if cell_count < 4:
+            continue
+
+        # Extract row metadata
+        richiesta_del = (await cells.nth(0).inner_text()).strip() if cell_count > 0 else ""
+        oggetto = (await cells.nth(1).inner_text()).strip() if cell_count > 1 else ""
+        formato = (await cells.nth(2).inner_text()).strip() if cell_count > 2 else ""
+
+        # Find download links in "salva" column (typically the second-to-last column)
+        save_links = row.locator("a[href*='salva'], a[href*='Documento'], a img[alt*='salva' i]")
+        if await save_links.count() == 0:
+            # Try any link in the last few cells
+            for ci in range(max(0, cell_count - 3), cell_count):
+                cell_links = cells.nth(ci).locator("a[href]")
+                if await cell_links.count() > 0:
+                    save_links = cell_links
+                    break
+
+        link_count = await save_links.count()
+        for li in range(link_count):
+            link = save_links.nth(li)
+            link_href = await link.get_attribute("href") or ""
+            if not link_href or "javascript:void" in link_href.lower() or "elimina" in link_href.lower():
+                continue
+
+            try:
+                async with page.expect_download(timeout=60000) as download_info:
+                    await link.click()
+                download = await download_info.value
+                filename = download.suggested_filename or f"richiesta_{i + 1}_{li}.dat"
+                save_path = os.path.join(docs_dir, filename)
+                await download.save_as(save_path)
+                file_size = os.path.getsize(save_path)
+
+                file_ext = os.path.splitext(filename)[1].lower()
+                file_format = file_ext.lstrip(".").upper() or formato.upper()
+                log.info("Documento scaricato: %s (%s, %d bytes)", filename, file_format, file_size)
+
+                doc_info = {
+                    "filename": filename,
+                    "path": save_path,
+                    "file_format": file_format,
+                    "file_size": file_size,
+                    "oggetto": oggetto,
+                    "richiesta_del": richiesta_del,
+                    "parsed_data": None,
+                }
+
+                # Parse XML content
+                if file_format in ("XML", "P7M"):
+                    parsed = _parse_visura_xml(save_path)
+                    if parsed:
+                        doc_info["parsed_data"] = parsed
+                        log.info("XML parsed: %s — %d intestati, %s",
+                                 parsed.get("tipo", ""), len(parsed.get("intestati", [])),
+                                 f"F.{parsed.get('foglio')} P.{parsed.get('particella')}")
+
+                downloaded.append(doc_info)
+
+            except Exception as e:
+                log.warning("Errore download documento riga %d link %d: %s", i + 1, li + 1, e)
+
+    # Persist to database
+    try:
+        await _save_documents_to_db(downloaded)
+    except Exception as e:
+        log.warning("Errore salvataggio documenti in DB: %s", e)
+
+    log.info("[green]%d documenti scaricati[/green] da Richieste", len(downloaded))
+    return downloaded
+
+
+def _parse_visura_xml(file_path: str) -> dict | None:
+    """Parse a SISTER visura XML file and extract structured data.
+
+    Handles both plain .xml and .p7m (signed XML) files.
+    """
+    try:
+        content = open(file_path, "r", encoding="utf-8", errors="ignore").read()
+
+        # P7M files have a binary signature wrapper — extract the XML portion
+        if file_path.endswith(".p7m"):
+            xml_start = content.find("<?xml")
+            if xml_start == -1:
+                xml_start = content.find("<Visura")
+            if xml_start == -1:
+                # Try reading as binary and finding XML
+                raw = open(file_path, "rb").read()
+                xml_start = raw.find(b"<?xml")
+                if xml_start == -1:
+                    xml_start = raw.find(b"<Visura")
+                if xml_start >= 0:
+                    content = raw[xml_start:].decode("utf-8", errors="ignore")
+                else:
+                    log.warning("Nessun XML trovato in P7M: %s", file_path)
+                    return None
+            else:
+                content = content[xml_start:]
+
+        soup = BeautifulSoup(content, "xml")
+        if not soup.find():
+            soup = BeautifulSoup(content, "html.parser")
+
+        result = {
+            "tipo": "",
+            "provincia": "",
+            "comune": "",
+            "foglio": "",
+            "particella": "",
+            "subalterno": "",
+            "sezione_urbana": "",
+            "tipo_catasto": "",
+            "intestati": [],
+            "immobile": {},
+            "xml_content": content[:50000],  # store up to 50KB of raw XML
+        }
+
+        # Try standard SISTER XML tags
+        for tag_name, key in [
+            ("Provincia", "provincia"), ("Comune", "comune"),
+            ("Foglio", "foglio"), ("Particella", "particella"),
+            ("Subalterno", "subalterno"), ("SezioneUrbana", "sezione_urbana"),
+            ("TipoCatasto", "tipo_catasto"),
+        ]:
+            el = soup.find(tag_name) or soup.find(tag_name.lower())
+            if el and el.string:
+                result[key] = el.string.strip()
+
+        # Extract intestati
+        for intestato_el in soup.find_all("Intestato") or soup.find_all("intestato") or []:
+            intestato = {}
+            for child in intestato_el.children:
+                if hasattr(child, "name") and child.name and child.string:
+                    intestato[child.name] = child.string.strip()
+            if intestato:
+                result["intestati"].append(intestato)
+
+        # Extract immobile data
+        immobile_el = soup.find("Immobile") or soup.find("immobile") or soup.find("DatiImmobile")
+        if immobile_el:
+            for child in immobile_el.children:
+                if hasattr(child, "name") and child.name and child.string:
+                    result["immobile"][child.name] = child.string.strip()
+
+        # Determine document type from content
+        if soup.find("VisuraSoggetto") or soup.find("visuraSoggetto"):
+            result["tipo"] = "visura_soggetto"
+        elif soup.find("VisuraImmobile") or soup.find("visuraImmobile"):
+            result["tipo"] = "visura_immobile"
+        else:
+            result["tipo"] = "visura"
+
+        return result
+
+    except Exception as e:
+        log.warning("Errore parsing XML %s: %s", file_path, e)
+        return None
+
+
+async def _save_documents_to_db(documents: list[dict]) -> None:
+    """Persist downloaded documents to the visura_documents table."""
+    import json
+    from .database import _get_session_factory
+    from .db_models import VisuraDocumentDB
+
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        for doc in documents:
+            parsed = doc.get("parsed_data") or {}
+            row = VisuraDocumentDB(
+                document_type=parsed.get("tipo", ""),
+                file_format=doc.get("file_format", ""),
+                filename=doc.get("filename", ""),
+                file_path=doc.get("path"),
+                file_size=doc.get("file_size"),
+                oggetto=doc.get("oggetto"),
+                richiesta_del=doc.get("richiesta_del"),
+                provincia=parsed.get("provincia"),
+                comune=parsed.get("comune"),
+                foglio=parsed.get("foglio"),
+                particella=parsed.get("particella"),
+                subalterno=parsed.get("subalterno"),
+                sezione_urbana=parsed.get("sezione_urbana"),
+                tipo_catasto=parsed.get("tipo_catasto"),
+                intestati_json=json.dumps(parsed.get("intestati", []), ensure_ascii=False) if parsed.get("intestati") else None,
+                dati_immobile_json=json.dumps(parsed.get("immobile", {}), ensure_ascii=False) if parsed.get("immobile") else None,
+                xml_content=parsed.get("xml_content"),
+            )
+            session.add(row)
+        await session.commit()
+    log.info("Salvati %d documenti nel database", len(documents))
+
+
+async def _find_intestati_button(page):
+    """Locate the Intestati submit button on the page."""
+    selectors = [
+        "input[name='intestati'][value='Intestati']",
+        "input[value='Intestati']",
+        "input[name='intestati']",
+        "button:has-text('Intestati')",
+        "input[type='submit'][value*='ntestat']",
+        "*[value='Intestati']",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if await locator.count() > 0:
+                return locator.first
+        except Exception:
+            continue
+    return None
+
+
+def _extract_intestati_from_page(html_content: str) -> list[dict]:
+    """Extract intestati table rows from a page's HTML content."""
+    soup = BeautifulSoup(html_content, "html.parser")
+    intestati_keywords = {"Cognome", "Nome", "Nominativo o denominazione", "Codice fiscale", "Titolarità"}
+
+    for table in soup.find_all("table"):
+        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        if any(kw in headers for kw in intestati_keywords):
+            rows = []
+            for tr in table.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if cells:
+                    while len(cells) < len(headers):
+                        cells.append("")
+                    rows.append(dict(zip(headers, cells)))
+            if rows:
+                return rows
+
+    # Fallback: try any table that doesn't look like an immobili table
+    for table in soup.find_all("table"):
+        headers = [th.get_text(strip=True) for th in table.find_all("th")]
+        if headers and "Foglio" not in headers and "Particella" not in headers:
+            rows = []
+            for tr in table.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+                if cells:
+                    while len(cells) < len(headers):
+                        cells.append("")
+                    rows.append(dict(zip(headers, cells)))
+            if rows:
+                return rows
+
+    return []
+
+
+async def _extract_intestati_playwright(page) -> list[dict]:
+    """Extract intestati table using Playwright locators (no BS4)."""
+    tables = page.locator("table.listaIsp4, table[class*='lista']")
+    count = await tables.count()
+
+    for i in range(count):
+        table = tables.nth(i)
+        headers_els = table.locator("th")
+        h_count = await headers_els.count()
+        if h_count == 0:
+            continue
+        headers = []
+        for hi in range(h_count):
+            headers.append((await headers_els.nth(hi).inner_text()).strip())
+
+        # Check if this is an intestati table
+        intestati_keywords = {"Cognome", "Nome", "Nominativo o denominazione", "Codice fiscale", "Titolarità"}
+        if not any(kw in headers for kw in intestati_keywords):
+            continue
+
+        rows = []
+        tr_els = table.locator("tbody tr, tr")
+        tr_count = await tr_els.count()
+        for ri in range(tr_count):
+            td_els = tr_els.nth(ri).locator("td")
+            td_count = await td_els.count()
+            if td_count == 0:
+                continue
+            cells = []
+            for ci in range(td_count):
+                cells.append((await td_els.nth(ci).inner_text()).strip())
+            while len(cells) < len(headers):
+                cells.append("")
+            rows.append(dict(zip(headers, cells)))
+        if rows:
+            return rows
+
+    return []
+
+
+async def _extract_visura_immobile_playwright(page) -> dict | None:
+    """Extract visura immobile data from the result page using Playwright."""
+    result = {}
+    try:
+        tables = page.locator("table.listaIsp4, table[class*='lista']")
+        count = await tables.count()
+        for i in range(count):
+            table = tables.nth(i)
+            html = await table.inner_html(timeout=5000)
+            if "Foglio" in html or "Particella" in html or "Categoria" in html or "Rendita" in html:
+                parsed = parse_table(html)
+                if parsed:
+                    result["data"] = parsed
+                    break
+
+        # Capture page text for any additional info
+        body_text = await page.inner_text("body")
+        if "NESSUNA CORRISPONDENZA" in body_text:
+            result["error"] = "NESSUNA CORRISPONDENZA TROVATA"
+    except Exception as e:
+        log.debug("Errore estrazione visura immobile: %s", e)
+        result["error"] = str(e)
+
+    return result or None
 
 
 async def run_visura_soggetto(
@@ -508,7 +1187,7 @@ async def run_visura_soggetto(
     tipo_catasto="E",
     provincia=None,
     comune=None,
-    motivo="",
+    motivo="Esplorazione",
     per_conto_di=None,
 ):
     import os
@@ -595,6 +1274,7 @@ async def run_visura_soggetto(
             await motivo_field.fill(motivo)
 
     # STEP 6: Submit search
+    await page_logger.log(page, "form_compilato")
     log.info("Esecuzione ricerca soggetto...")
     ricerca_btn = page.locator("input[name='ricerca'][value='Ricerca']")
     if await ricerca_btn.count() == 0:
@@ -669,7 +1349,7 @@ async def run_visura_persona_giuridica(
     identificativo,
     tipo_catasto="E",
     provincia=None,
-    motivo="",
+    motivo="Esplorazione",
     per_conto_di=None,
 ):
     """Search by legal entity (P.IVA or denominazione) on SISTER.
@@ -764,6 +1444,7 @@ async def run_visura_persona_giuridica(
             await motivo_field.fill(motivo)
 
     # STEP 6: Submit
+    await page_logger.log(page, "form_compilato")
     log.info("Esecuzione ricerca persona giuridica...")
     ricerca_btn = page.locator("input[name='ricerca'][value='Ricerca']")
     if await ricerca_btn.count() == 0:
@@ -805,7 +1486,7 @@ async def run_elenco_immobili(
     tipo_catasto="T",
     foglio=None,
     sezione=None,
-    motivo="",
+    motivo="Esplorazione",
     per_conto_di=None,
 ):
     """List all properties in a comune (optionally filtered by foglio).
@@ -857,16 +1538,8 @@ async def run_elenco_immobili(
         raise Exception(f"Comune '{comune}' non trovato per provincia '{provincia}'")
     await page.locator(comune_selector).select_option(comune_value)
 
-    # STEP 4.1: Optionally select sezione
-    if sezione:
-        log.info("Selezionando sezione: [cyan]%s[/cyan]", sezione)
-        sel_sezione = page.locator("input[name='selSezione'][value='scegli la sezione']")
-        if await sel_sezione.count() > 0:
-            await sel_sezione.click()
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            sezione_value = await find_best_option_match(page, "select[name='sezione']", sezione)
-            if sezione_value:
-                await page.locator("select[name='sezione']").select_option(sezione_value)
+    # STEP 4.1: Select sezione (auto-detect if mandatory)
+    await _select_sezione(page, comune, sezione)
 
     # STEP 4.2: Optionally fill foglio
     if foglio:
@@ -876,6 +1549,7 @@ async def run_elenco_immobili(
             await foglio_field.fill(str(foglio))
 
     # STEP 5: Submit
+    await page_logger.log(page, "form_compilato")
     log.info("Esecuzione elenco immobili...")
     ricerca_btn = page.locator("input[name='ricerca'][value='Ricerca']")
     if await ricerca_btn.count() == 0:
@@ -950,8 +1624,8 @@ async def _navigate_select_province_and_click(page, page_logger, provincia, menu
     await page_logger.log(page, menu_link_name.lower().replace(" ", "_"))
 
 
-async def _fill_richiedente_motivo(page, motivo="Search", per_conto_di=None):
-    """Fill the richiedente and motivo fields if present."""
+async def _fill_richiedente_motivo(page, motivo="Esplorazione", per_conto_di=None, sezione_urbana=None):
+    """Fill the richiedente, motivo, and sezione urbana fields if present."""
     import os
     if per_conto_di is None:
         per_conto_di = os.getenv("ADE_USERNAME", "")
@@ -966,10 +1640,15 @@ async def _fill_richiedente_motivo(page, motivo="Search", per_conto_di=None):
             field = page.locator("input[name='motivo']")
         if await field.count() > 0:
             await field.fill(motivo)
+    if sezione_urbana:
+        field = page.locator("input[name='sezUrb']")
+        if await field.count() > 0:
+            await field.fill(str(sezione_urbana).upper())
 
 
 async def _submit_and_extract(page, page_logger, step_name):
     """Submit a SISTER search form and extract results table."""
+    await page_logger.log(page, f"form_compilato_{step_name}")
     ricerca_btn = page.locator("input[name='ricerca'][value='Ricerca']")
     if await ricerca_btn.count() == 0:
         ricerca_btn = page.locator("input[type='submit'][value='Ricerca']")
@@ -977,6 +1656,7 @@ async def _submit_and_extract(page, page_logger, step_name):
         ricerca_btn = page.locator("input[name='scelta'][value='Ricerca']")
     await ricerca_btn.click()
     await page.wait_for_load_state("networkidle", timeout=60000)
+    await _wait_for_captcha(page)
     await page_logger.log(page, f"risultati_{step_name}")
 
     page_text = await page.inner_text("body")
@@ -1011,14 +1691,7 @@ async def run_ricerca_indirizzo(
         raise Exception(f"Comune '{comune}' non trovato")
     await page.locator("select[name='denomComune']").select_option(comune_value)
 
-    if sezione:
-        sel = page.locator("input[name='selSezione'][value='scegli la sezione']")
-        if await sel.count() > 0:
-            await sel.click()
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            sv = await find_best_option_match(page, "select[name='sezione']", sezione)
-            if sv:
-                await page.locator("select[name='sezione']").select_option(sv)
+    await _select_sezione(page, comune, sezione)
 
     ind_field = page.locator("input[name='indirizzo']")
     if await ind_field.count() == 0:
@@ -1155,14 +1828,7 @@ async def run_ricerca_mappa(
             await part_field.fill(str(particella))
 
     # Sezione
-    if sezione:
-        sel = page.locator("input[name='selSezione']")
-        if await sel.count() > 0:
-            await sel.click()
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            sv = await find_best_option_match(page, "select[name='sezione']", sezione)
-            if sv:
-                await page.locator("select[name='sezione']").select_option(sv)
+    await _select_sezione(page, comune, sezione)
 
     await _fill_richiedente_motivo(page)
 
@@ -1726,6 +2392,7 @@ async def run_ispezione_ipotecaria(
     # Fill richiedente
     per_conto_di = os.getenv("ADE_USERNAME", "")
     await _fill_richiedente_motivo(page, motivo="Ispezione ipotecaria", per_conto_di=per_conto_di)
+    await page_logger.log(page, "form_compilato")
 
     # Submit the search
     log.info("Submitting ispezione ipotecaria...")
@@ -1980,7 +2647,7 @@ async def extract_all_sezioni(page: Page, tipo_catasto: str = "T", max_province:
 
 
 async def run_visura_immobile(
-    page, provincia="Trieste", comune="Trieste", sezione=None, foglio="9", particella="166", subalterno=None
+    page, provincia="Trieste", comune="Trieste", sezione=None, foglio="9", particella="166", subalterno=None, sezione_urbana=None
 ):
     """
     Esegue una visura catastale per un immobile specifico (solo per fabbricati con subalterno).
@@ -2039,31 +2706,14 @@ async def run_visura_immobile(
     log.info("Comune: [cyan]%s[/cyan]", comune_value)
     await page.locator("select[name='denomComune']").select_option(comune_value)
 
-    # Seleziona sezione se specificata
-    if sezione:
-        log.info("Selezionando sezione: [cyan]%s[/cyan]", sezione)
-        await page.locator("input[name='selSezione'][value='scegli la sezione']").click()
-        await page.wait_for_load_state("networkidle", timeout=30000)
+    await _select_sezione(page, comune, sezione)
 
-        options = await page.locator("select[name='sezione'] option").all()
-        available_sections = []
-        for option in options:
-            value = await option.get_attribute("value")
-            text = await option.inner_text()
-            if value and text:
-                available_sections.append(f"{text} ({value})")
-
-        if not available_sections:
-            log.warning("Nessuna sezione disponibile per '%s', skip", comune)
-        else:
-            sezione_value = await find_best_option_match(page, "select[name='sezione']", sezione)
-            if not sezione_value:
-                log.warning("Sezione '%s' non trovata. Disponibili: %s", sezione, ", ".join(available_sections))
-            else:
-                try:
-                    await page.locator("select[name='sezione']").select_option(sezione_value)
-                except Exception as e:
-                    log.warning("Errore selezione sezione '%s': %s", sezione_value, e)
+    # Fill "Sezione urbana" — only when explicitly provided (separate from dropdown sezione)
+    if sezione_urbana:
+        sez_urb_field = page.locator("input[name='sezUrb']")
+        if await sez_urb_field.count() > 0:
+            await sez_urb_field.fill(str(sezione_urbana).upper())
+            log.info("Sezione urbana: [cyan]%s[/cyan]", sezione_urbana)
 
     # Inserisci dati immobile
     log.info("Foglio: [cyan]%s[/cyan]  Particella: [cyan]%s[/cyan]  Sub: [cyan]%s[/cyan]", foglio, particella, subalterno)
@@ -2071,17 +2721,21 @@ async def run_visura_immobile(
     await page.locator("input[name='particella1']").fill(str(particella))
     await page.locator("input[name='subalterno1']").fill(str(subalterno))
 
+    await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
+    await page_logger.log(page, "form_compilato")
+
     # Clicca Ricerca
     log.info("Esecuzione ricerca...")
     await page.locator("input[name='scelta'][value='Ricerca']").click()
     await page.wait_for_load_state("networkidle", timeout=30000)
+    await _wait_for_captcha(page)
     await page_logger.log(page, "ricerca")
 
     # STEP 3: Gestisci conferma assenza subalterno (se necessario)
     try:
         conferma_button = page.locator("input[name='confAssSub'][value='Conferma']")
         if await conferma_button.count() > 0:
-            log.debug("Conferma assenza subalterno richiesta")
+            log.warning("Confermi Assenza Subalterno — confermando automaticamente")
             await conferma_button.click()
             await page.wait_for_load_state("networkidle", timeout=30000)
             await page_logger.log(page, "conferma_subalterno")
@@ -2106,6 +2760,9 @@ async def run_visura_immobile(
     # STEP 5: Estrazione intestati
     log.info("Estraendo intestati...")
     intestati = []
+
+    # Re-fill richiedente/motivo/sezUrb on results page (SISTER clears them after submit)
+    await _fill_richiedente_motivo(page, sezione_urbana=sezione_urbana)
     try:
         intestati_button_selectors = [
             "input[name='intestati'][value='Intestati']",
@@ -2221,6 +2878,6 @@ async def run_visura_immobile(
     elapsed = time.time() - time0
     log.info("[green]Visura immobile completata[/green] in %.1fs — %d intestati", elapsed, len(intestati))
 
-    result = {"immobile": immobile_data, "intestati": intestati, "total_intestati": len(intestati)}
+    result = {"immobile": immobile_data, "intestati": intestati, "total_intestati": len(intestati), "page_visits": page_logger.page_visits}
 
     return result
