@@ -1,4 +1,8 @@
-"""Service layer: BrowserManager and VisuraService for sister."""
+"""Service layer: VisuraService — request queue, cache, and auth lifecycle.
+
+BrowserManager lives in sister.browser and is re-exported here for
+backwards compatibility.
+"""
 
 import asyncio
 import logging
@@ -7,10 +11,9 @@ from contextlib import suppress
 from datetime import datetime
 from typing import Dict, Optional
 
-from aecs4u_auth.browser import BrowserConfig, PageLogger  # noqa: F401 (PageLogger re-exported)
-from aecs4u_auth.browser import BrowserManager as AuthBrowserManager
-from playwright.async_api import Page
+from aecs4u_auth.browser import PageLogger  # noqa: F401 (re-exported for main.py)
 
+from .browser import BrowserManager  # noqa: F401 (re-exported)
 from .database import (
     cleanup_old_responses,
     compute_cache_key,
@@ -23,8 +26,6 @@ from .database import (
     get_response as load_stored_response,
 )
 from .models import (
-    AuthenticationError,
-    BrowserError,
     ElencoImmobiliRequest,
     GenericSisterRequest,
     IspezioneIpotecariaRequest,
@@ -36,476 +37,13 @@ from .models import (
     VisuraResponse,
     VisuraSoggettoRequest,
 )
-from .utils import (
-    extract_all_sezioni,
-    run_consultazione_richieste,
-    run_elaborato_planimetrico,
-    run_elenco_immobili,
-    run_export_mappa,
-    run_ispezione_ipotecaria,
-    run_ispezioni,
-    run_ispezioni_cartacee,
-    run_ispezioni_ipotecarie_elenchi,
-    run_ispezioni_ipotecarie_stato,
-    run_originali_impianto,
-    run_punti_fiduciali,
-    run_ricerca_indirizzo,
-    run_ricerca_mappa,
-    run_ricerca_nota,
-    run_ricerca_partita,
-    run_riepilogo_visure,
-    run_visura,
-    run_visura_immobile,
-    run_visura_persona_giuridica,
-    run_visura_soggetto,
-)
-
-_GENERIC_DISPATCHERS = {
-    "indirizzo": run_ricerca_indirizzo,
-    "partita": run_ricerca_partita,
-    "nota": run_ricerca_nota,
-    "mappa": run_ricerca_mappa,
-    "export_mappa": run_export_mappa,
-    "originali": run_originali_impianto,
-    "fiduciali": run_punti_fiduciali,
-    "ispezioni": run_ispezioni,
-    "ispezioni_cart": run_ispezioni_cartacee,
-    "elaborato_planimetrico": run_elaborato_planimetrico,
-}
-
-# No-args dispatchers (riepilogo, richieste — don't take standard search params)
-_NOARGS_DISPATCHERS = {
-    "riepilogo_visure": run_riepilogo_visure,
-    "richieste": run_consultazione_richieste,
-    "ipotecaria_stato": run_ispezioni_ipotecarie_stato,
-    "ipotecaria_elenchi": run_ispezioni_ipotecarie_elenchi,
-}
 
 logger = logging.getLogger("sister")
 
 
-class BrowserManager:
-    def __init__(self):
-        self._auth = AuthBrowserManager(BrowserConfig())
-        self.last_login_time = None
-        self._page_lock = asyncio.Lock()
-
-    @property
-    def authenticated(self) -> bool:
-        return self._auth.is_authenticated
-
-    @property
-    def is_cdp(self) -> bool:
-        """True when connected to a shared browser via CDP."""
-        return self._auth.is_cdp
-
-    @property
-    def auth_page(self) -> Optional[Page]:
-        session = self._auth.session
-        if session and session.is_valid:
-            return session.page
-        return None
-
-    async def initialize(self):
-        """Initialize the browser.
-
-        When BROWSER_CDP_ENDPOINT is set in the environment, aecs4u-auth
-        connects to a running Chrome/Chromium process via CDP instead of
-        launching a new one.  This allows sister and opendata (or any other
-        service using aecs4u-auth) to share the same browser and session.
-        """
-        try:
-            if not self._auth.config.cdp_endpoint:
-                # Local launch — inject --start-maximized for full viewport
-                from aecs4u_auth.browser import manager as _auth_manager
-                if hasattr(_auth_manager, '_CHROMIUM_ARGS'):
-                    if "--start-maximized" not in _auth_manager._CHROMIUM_ARGS:
-                        _auth_manager._CHROMIUM_ARGS.append("--start-maximized")
-
-            await self._auth.initialize()
-
-            # For local launch, re-create context with no_viewport=True
-            if not self.is_cdp:
-                browser = self._auth._browser
-                if browser:
-                    _orig_new_context = browser.new_context
-                    self._auth._auth_page = None
-                    if self._auth._context:
-                        await self._auth._context.close()
-                    self._auth._context = await _orig_new_context(no_viewport=True)
-
-            mode = "CDP" if self.is_cdp else "local"
-            logger.info("Browser inizializzato (%s)", mode)
-        except Exception as e:
-            logger.error("Failed to initialize browser: %s", e)
-            raise BrowserError(f"Browser initialization failed: {e}") from e
-
-    async def login(self):
-        """Esegue il login SPID e naviga a SISTER"""
-        try:
-            await self._auth.login(service="sister")
-            self.last_login_time = datetime.now()
-            logger.info("Login completato con successo")
-        except Exception as e:
-            logger.error("Errore durante il login: %s", e)
-            raise AuthenticationError(f"Login failed: {e}") from e
-
-    async def start_keep_alive(self):
-        await self._auth.start_keepalive()
-
-    async def stop_keep_alive(self):
-        await self._auth.stop_keepalive()
-
-    async def _ensure_authenticated(self):
-        try:
-            await self._auth.ensure_authenticated()
-            self.last_login_time = datetime.now()
-        except Exception as e:
-            logger.error("Errore nella re-autenticazione: %s", e)
-            raise AuthenticationError(f"Re-authentication failed: {e}") from e
-
-    async def _get_authenticated_page(self) -> Page:
-        # In CDP mode, check if the connection is still alive and reconnect if needed
-        if self.is_cdp and (self._auth._browser is None or not self._auth._browser.is_connected()):
-            logger.warning("CDP connection lost — reconnecting")
-            await self._auth.initialize()
-            await self.login()
-            await self.start_keep_alive()
-
-        await self._ensure_authenticated()
-        page = self.auth_page
-        if page is None:
-            raise AuthenticationError("Sessione autenticata non disponibile")
-        return page
-
-    async def esegui_visura(self, request: VisuraRequest) -> VisuraResponse:
-        """Esegue una visura catastale (solo dati catastali, senza intestati)"""
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-
-                try:
-                    result = await run_visura(
-                        page,
-                        request.provincia,
-                        request.comune,
-                        request.sezione,
-                        request.foglio,
-                        request.particella,
-                        request.tipo_catasto,
-                        extract_intestati=False,
-                        subalterno=request.subalterno,
-                        sezione_urbana=request.sezione_urbana,
-                    )
-                except Exception as e:
-                    raise BrowserError(f"Failed to execute visura: {e}") from e
-
-            logger.info(f"Visura completata per request {request.request_id}")
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=True,
-                tipo_catasto=request.tipo_catasto,
-                data=result,
-            )
-
-        except (AuthenticationError, BrowserError) as e:
-            logger.error(f"Errore in visura {request.request_id}: {e}")
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=False,
-                tipo_catasto=request.tipo_catasto,
-                error=str(e),
-            )
-        except Exception as e:
-            logger.error(f"Errore inatteso in visura {request.request_id}: {e}")
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=False,
-                tipo_catasto=request.tipo_catasto,
-                error=f"Errore inatteso: {str(e)}",
-            )
-
-    async def esegui_visura_intestati(self, request: VisuraIntestatiRequest) -> VisuraResponse:
-        """Esegue una visura per ottenere gli intestati di un immobile specifico."""
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-
-                if request.tipo_catasto == "F" and request.subalterno:
-                    result = await run_visura_immobile(
-                        page,
-                        provincia=request.provincia,
-                        comune=request.comune,
-                        sezione=request.sezione,
-                        foglio=request.foglio,
-                        particella=request.particella,
-                        subalterno=request.subalterno,
-                        sezione_urbana=request.sezione_urbana,
-                    )
-                else:
-                    result = await run_visura(
-                        page,
-                        request.provincia,
-                        request.comune,
-                        request.sezione,
-                        request.foglio,
-                        request.particella,
-                        request.tipo_catasto,
-                        extract_intestati=True,
-                        sezione_urbana=request.sezione_urbana,
-                    )
-
-            logger.info(f"Visura intestati completata per {request.request_id}")
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=True,
-                tipo_catasto=request.tipo_catasto,
-                data=result,
-            )
-
-        except Exception as e:
-            logger.error(f"Errore in visura intestati {request.request_id}: {e}")
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=False,
-                tipo_catasto=request.tipo_catasto,
-                error=str(e),
-            )
-
-    async def esegui_visura_soggetto(self, request: VisuraSoggettoRequest) -> VisuraResponse:
-        """Esegue una ricerca nazionale per soggetto (codice fiscale)."""
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-                try:
-                    result = await run_visura_soggetto(
-                        page,
-                        codice_fiscale=request.codice_fiscale,
-                        tipo_catasto=request.tipo_catasto,
-                        provincia=request.provincia,
-                        motivo="Esplorazione",
-                    )
-                except Exception as e:
-                    raise BrowserError(f"Failed to execute soggetto search: {e}") from e
-
-            logger.info("Ricerca soggetto completata per request %s", request.request_id)
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=True,
-                tipo_catasto=request.tipo_catasto,
-                data=result,
-            )
-
-        except (AuthenticationError, BrowserError) as e:
-            logger.error("Errore in ricerca soggetto %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=False,
-                tipo_catasto=request.tipo_catasto,
-                error=str(e),
-            )
-        except Exception as e:
-            logger.error("Errore inatteso in ricerca soggetto %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=False,
-                tipo_catasto=request.tipo_catasto,
-                error=f"Errore inatteso: {str(e)}",
-            )
-
-    async def esegui_visura_persona_giuridica(self, request: VisuraPersonaGiuridicaRequest) -> VisuraResponse:
-        """Esegue una ricerca per persona giuridica (P.IVA o denominazione)."""
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-                try:
-                    result = await run_visura_persona_giuridica(
-                        page,
-                        identificativo=request.identificativo,
-                        tipo_catasto=request.tipo_catasto,
-                        provincia=request.provincia,
-                        motivo="Esplorazione",
-                    )
-                except Exception as e:
-                    raise BrowserError(f"Failed to execute PNF search: {e}") from e
-
-            return VisuraResponse(
-                request_id=request.request_id, success=True,
-                tipo_catasto=request.tipo_catasto, data=result,
-            )
-        except (AuthenticationError, BrowserError) as e:
-            logger.error("Errore in ricerca PNF %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=str(e),
-            )
-        except Exception as e:
-            logger.error("Errore inatteso in ricerca PNF %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=f"Errore inatteso: {str(e)}",
-            )
-
-    async def esegui_elenco_immobili(self, request: ElencoImmobiliRequest) -> VisuraResponse:
-        """Esegue un elenco immobili per un comune."""
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-                try:
-                    result = await run_elenco_immobili(
-                        page,
-                        provincia=request.provincia,
-                        comune=request.comune,
-                        tipo_catasto=request.tipo_catasto,
-                        foglio=request.foglio,
-                        sezione=request.sezione,
-                        motivo="Esplorazione",
-                    )
-                except Exception as e:
-                    raise BrowserError(f"Failed to execute EIMM: {e}") from e
-
-            return VisuraResponse(
-                request_id=request.request_id, success=True,
-                tipo_catasto=request.tipo_catasto, data=result,
-            )
-        except (AuthenticationError, BrowserError) as e:
-            logger.error("Errore in elenco immobili %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=str(e),
-            )
-        except Exception as e:
-            logger.error("Errore inatteso in elenco immobili %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=f"Errore inatteso: {str(e)}",
-            )
-
-    async def esegui_generic(self, request: GenericSisterRequest) -> VisuraResponse:
-        """Execute a generic SISTER search."""
-        dispatcher = _GENERIC_DISPATCHERS.get(request.search_type)
-        noargs_dispatcher = _NOARGS_DISPATCHERS.get(request.search_type)
-
-        if not dispatcher and not noargs_dispatcher:
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto,
-                error=f"Unknown search type: {request.search_type}",
-            )
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-                if noargs_dispatcher:
-                    result = await noargs_dispatcher(page)
-                else:
-                    kwargs = {
-                        "page": page,
-                        "provincia": request.provincia,
-                        **({"comune": request.comune} if request.comune else {}),
-                        **({"tipo_catasto": request.tipo_catasto} if request.tipo_catasto else {}),
-                        **request.params,
-                    }
-                    result = await dispatcher(**kwargs)
-
-            return VisuraResponse(
-                request_id=request.request_id, success=True,
-                tipo_catasto=request.tipo_catasto, data=result,
-            )
-        except (AuthenticationError, BrowserError) as e:
-            logger.error("Errore in %s %s: %s", request.search_type, request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=str(e),
-            )
-        except Exception as e:
-            logger.error("Errore inatteso in %s %s: %s", request.search_type, request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=f"Errore inatteso: {str(e)}",
-            )
-
-    async def esegui_ispezione_ipotecaria(self, request: IspezioneIpotecariaRequest) -> VisuraResponse:
-        """Execute an Ispezione Ipotecaria (paid inspection)."""
-        try:
-            async with self._page_lock:
-                page = await self._get_authenticated_page()
-                try:
-                    result = await run_ispezione_ipotecaria(
-                        page,
-                        provincia=request.provincia,
-                        comune=request.comune,
-                        tipo_ricerca=request.tipo_ricerca,
-                        codice_fiscale=request.codice_fiscale,
-                        identificativo=request.identificativo,
-                        foglio=request.foglio,
-                        particella=request.particella,
-                        numero_nota=request.numero_nota,
-                        anno_nota=request.anno_nota,
-                        tipo_catasto=request.tipo_catasto,
-                        auto_confirm=request.auto_confirm,
-                    )
-                except Exception as e:
-                    raise BrowserError(f"Failed to execute ispezione ipotecaria: {e}") from e
-
-            return VisuraResponse(
-                request_id=request.request_id,
-                success=True,
-                tipo_catasto=request.tipo_catasto,
-                data=result,
-            )
-        except (AuthenticationError, BrowserError) as e:
-            logger.error("Errore in ispezione ipotecaria %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=str(e),
-            )
-        except Exception as e:
-            logger.error("Errore inatteso in ispezione ipotecaria %s: %s", request.request_id, e)
-            return VisuraResponse(
-                request_id=request.request_id, success=False,
-                tipo_catasto=request.tipo_catasto, error=f"Errore inatteso: {str(e)}",
-            )
-
-    async def esegui_extract_sezioni(self, tipo_catasto: str, max_province: int) -> list:
-        """Esegue l'estrazione sezioni in modo esclusivo sulla sessione browser condivisa."""
-        async with self._page_lock:
-            page = await self._get_authenticated_page()
-            return await extract_all_sezioni(page, tipo_catasto, max_province)
-
-    async def download_richieste_documents(self) -> list[dict]:
-        """Download all available documents from the SISTER Richieste page."""
-        from .utils import _download_richieste_documents, PageLogger
-        async with self._page_lock:
-            page = await self._get_authenticated_page()
-            page_logger = PageLogger("download_richieste")
-            return await _download_richieste_documents(page, page_logger)
-
-    async def close(self):
-        """Close browser resources (delegates to aecs4u-auth)."""
-        await self._auth.close()
-        logger.info("Browser chiuso")
-
-    async def graceful_shutdown(self):
-        """Logout from SISTER session, then close browser resources."""
-        logger.info("Iniziando shutdown graceful...")
-        # Close SISTER sessions before the general logout
-        try:
-            page = self.auth_page
-            if page and not page.is_closed():
-                for url in [
-                    "https://sister3.agenziaentrate.gov.it/Servizi/CloseSessionsSis",
-                    "https://sister3.agenziaentrate.gov.it/Servizi/CloseSessions",
-                ]:
-                    with suppress(Exception):
-                        await page.goto(url, timeout=10000)
-                        logger.info("Sessione SISTER chiusa: %s", url)
-        except Exception as e:
-            logger.warning("Errore chiusura sessione SISTER: %s", e)
-        await self._auth.graceful_shutdown()
-        logger.info("Shutdown graceful completato")
-
-
 class VisuraService:
+    """Queue-based request dispatcher with response caching and persistence."""
+
     def __init__(self):
         self.browser_manager = BrowserManager()
         self.queue_max_size = self._parse_positive_int_env("QUEUE_MAX_SIZE", 100)
@@ -526,23 +64,20 @@ class VisuraService:
         raw = os.getenv(var_name)
         if raw is None:
             return default
-
         try:
             value = int(raw)
             if value <= 0:
                 raise ValueError
             return value
         except ValueError:
-            logger.warning(f"{var_name} non valido ({raw!r}), uso default={default}")
+            logger.warning("%s non valido (%r), uso default=%d", var_name, raw, default)
             return default
 
-    async def initialize(self, background_auth: bool = True):
-        """Inizializza il servizio.
+    # ------------------------------------------------------------------
+    # Auth lifecycle
+    # ------------------------------------------------------------------
 
-        Args:
-            background_auth: If True, browser init + login run in a background task
-                so the app starts immediately. Queries wait until auth completes.
-        """
+    async def initialize(self, background_auth: bool = True):
         self.processing = True
         self._worker_task = asyncio.create_task(self._process_requests(), name="visura-request-worker")
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup(), name="visura-cache-cleanup")
@@ -553,7 +88,6 @@ class VisuraService:
             await self._do_auth()
 
     async def _do_auth(self):
-        """Run browser initialization and login."""
         await self.browser_manager.initialize()
         await self.browser_manager.login()
         await self.browser_manager.start_keep_alive()
@@ -561,11 +95,6 @@ class VisuraService:
         logger.info("Browser autenticato e pronto")
 
     async def _background_auth(self):
-        """Background task: initialize browser and login with retry.
-
-        On "active session" errors, attempts to close the stale session first
-        by navigating to the SISTER logout URL.
-        """
         max_retries = 5
         last_error = ""
         for attempt in range(1, max_retries + 1):
@@ -593,11 +122,9 @@ class VisuraService:
         )
 
     async def _try_close_stale_session(self):
-        """Attempt to close a stale SISTER session by hitting the logout URL."""
         try:
             page = self.browser_manager._auth._auth_page
             if not page or page.is_closed():
-                # Create a temporary page
                 ctx = self.browser_manager._auth._context
                 if ctx:
                     page = await ctx.new_page()
@@ -618,7 +145,8 @@ class VisuraService:
 
             # Close the temp page if we created one
             if page != self.browser_manager._auth._auth_page:
-                await page.close()
+                with suppress(Exception):
+                    await page.close()
 
         except Exception as e:
             logger.warning("Impossibile chiudere sessione stale: %s", e)
@@ -629,7 +157,6 @@ class VisuraService:
 
     @property
     def auth_status(self) -> dict:
-        """Structured auth/browser health state for /health and dashboard."""
         mode = "cdp" if self.browser_manager.is_cdp else "local"
         if self.auth_ready:
             return {"state": "ready", "mode": mode, "message": "Browser authenticated"}
@@ -641,8 +168,11 @@ class VisuraService:
             return {"state": "connecting", "mode": mode, "message": "Authentication in progress..."}
         return {"state": "unavailable", "mode": mode, "message": "Browser not initialized"}
 
+    # ------------------------------------------------------------------
+    # Request worker
+    # ------------------------------------------------------------------
+
     async def _process_requests(self):
-        """Processa le richieste in coda"""
         try:
             while True:
                 request = await self.request_queue.get()
@@ -653,10 +183,9 @@ class VisuraService:
                         logger.info("Ricevuto segnale di stop worker")
                         return
 
-                    # Wait for auth to be ready before processing browser requests
                     if not self.auth_ready:
                         logger.debug("Waiting for browser authentication before processing request")
-                        for _ in range(60):  # wait up to 5 minutes
+                        for _ in range(60):
                             if self.auth_ready:
                                 break
                             await asyncio.sleep(5)
@@ -668,65 +197,69 @@ class VisuraService:
                     if isinstance(request, VisuraRequest):
                         response = await self.browser_manager.esegui_visura(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta visura {request.request_id}")
+                        logger.info("Processata richiesta visura %s", request.request_id)
                         should_sleep = True
 
                     elif isinstance(request, VisuraIntestatiRequest):
                         response = await self.browser_manager.esegui_visura_intestati(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta intestati {request.request_id}")
+                        logger.info("Processata richiesta intestati %s", request.request_id)
                         should_sleep = True
 
                     elif isinstance(request, VisuraSoggettoRequest):
                         response = await self.browser_manager.esegui_visura_soggetto(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta soggetto {request.request_id}")
+                        logger.info("Processata richiesta soggetto %s", request.request_id)
                         should_sleep = True
 
                     elif isinstance(request, VisuraPersonaGiuridicaRequest):
                         response = await self.browser_manager.esegui_visura_persona_giuridica(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta PNF {request.request_id}")
+                        logger.info("Processata richiesta PNF %s", request.request_id)
                         should_sleep = True
 
                     elif isinstance(request, ElencoImmobiliRequest):
                         response = await self.browser_manager.esegui_elenco_immobili(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta elenco immobili {request.request_id}")
+                        logger.info("Processata richiesta elenco immobili %s", request.request_id)
                         should_sleep = True
 
                     elif isinstance(request, IspezioneIpotecariaRequest):
                         response = await self.browser_manager.esegui_ispezione_ipotecaria(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta ipotecaria {request.request_id}")
+                        logger.info("Processata richiesta ipotecaria %s", request.request_id)
                         should_sleep = True
 
                     elif isinstance(request, GenericSisterRequest):
                         response = await self.browser_manager.esegui_generic(request)
                         await self._store_response(response)
-                        logger.info(f"Processata richiesta {request.search_type} {request.request_id}")
+                        logger.info("Processata richiesta %s %s", request.search_type, request.request_id)
                         should_sleep = True
 
                     else:
-                        logger.error(f"Tipo di richiesta sconosciuto: {type(request)}")
+                        logger.error("Tipo di richiesta sconosciuto: %s", type(request))
 
                 except Exception as e:
-                    logger.error(f"Errore nel processare richieste: {e}")
+                    logger.error("Errore nel processare richieste: %s", e)
                     await asyncio.sleep(5)
                 finally:
-                    if isinstance(request, (VisuraRequest, VisuraIntestatiRequest, VisuraSoggettoRequest, VisuraPersonaGiuridicaRequest, ElencoImmobiliRequest, GenericSisterRequest, IspezioneIpotecariaRequest)):
+                    if isinstance(request, (VisuraRequest, VisuraIntestatiRequest, VisuraSoggettoRequest,
+                                            VisuraPersonaGiuridicaRequest, ElencoImmobiliRequest,
+                                            GenericSisterRequest, IspezioneIpotecariaRequest)):
                         self.pending_request_ids.discard(request.request_id)
                     self.request_queue.task_done()
 
-                # Pausa tra le richieste per non sovraccaricare SISTER
                 if should_sleep:
                     await asyncio.sleep(2)
         finally:
             self.processing = False
             logger.info("Worker richieste terminato")
 
+    # ------------------------------------------------------------------
+    # Cache and response store
+    # ------------------------------------------------------------------
+
     async def _periodic_cleanup(self):
-        """Pulisce periodicamente le risposte scadute in cache e nel database."""
         from .database import is_db_writable
 
         try:
@@ -743,7 +276,7 @@ class VisuraService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"Errore nel cleanup periodico cache: {e}")
+            logger.error("Errore nel cleanup periodico cache: %s", e)
         finally:
             logger.info("Task cleanup cache terminato")
 
@@ -757,7 +290,6 @@ class VisuraService:
         self._cleanup_task = None
 
     async def _stop_worker(self):
-        """Ferma il worker in modo pulito e attende la sua terminazione."""
         task = self._worker_task
         self.processing = False
 
@@ -786,8 +318,7 @@ class VisuraService:
         await self._stop_cleanup_task()
 
     def _is_response_expired(self, response: VisuraResponse) -> bool:
-        age_seconds = (datetime.now() - response.timestamp).total_seconds()
-        return age_seconds > self.response_ttl_seconds
+        return (datetime.now() - response.timestamp).total_seconds() > self.response_ttl_seconds
 
     def _cleanup_response_store(self):
         expired_ids = [rid for rid, resp in self.response_store.items() if self._is_response_expired(resp)]
@@ -840,20 +371,17 @@ class VisuraService:
 
     @staticmethod
     def _request_cache_params(request_type: str, request) -> dict:
-        """Extract cache-relevant parameters from a request."""
         params = {"tipo_catasto": getattr(request, "tipo_catasto", "")}
         for attr in ("provincia", "comune", "foglio", "particella", "sezione", "subalterno",
                       "codice_fiscale", "identificativo", "search_type"):
             val = getattr(request, attr, None)
             if val:
                 params[attr] = val
-        # For GenericSisterRequest, include the params dict
         if hasattr(request, "params") and request.params:
             params.update(request.params)
         return params
 
     async def _check_cache(self, request_type: str, request, force: bool = False) -> Optional[SubmitResult]:
-        """Check if a cached response exists. Returns SubmitResult if cached, None otherwise."""
         if force:
             return None
         params = self._request_cache_params(request_type, request)
@@ -864,6 +392,10 @@ class VisuraService:
         response = self._response_from_db_record(record)
         logger.info("Cache hit for %s %s (key=%s...)", request_type, request.request_id, cache_key[:12])
         return SubmitResult(request_id=record["request_id"], cached=True, response=response)
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
 
     async def _persist_single_request(
         self, request_type: str, request: VisuraRequest | VisuraIntestatiRequest | VisuraSoggettoRequest
@@ -916,6 +448,10 @@ class VisuraService:
             logger.error("Errore persistenza batch richieste (%d item): %s", len(requests), e)
             raise RuntimeError("Errore durante il salvataggio delle richieste") from e
 
+    # ------------------------------------------------------------------
+    # Queue management (public API)
+    # ------------------------------------------------------------------
+
     def _queue_limit(self) -> int:
         queue_maxsize = self.request_queue.maxsize
         return queue_maxsize if queue_maxsize > 0 else self.queue_max_size
@@ -929,7 +465,7 @@ class VisuraService:
         if queue_maxsize > 0 and self.request_queue.qsize() + required_slots > queue_maxsize:
             raise QueueFullError(f"Coda piena (max {self._queue_limit()})")
 
-    def _enqueue_request_nowait(self, request: VisuraRequest | VisuraIntestatiRequest):
+    def _enqueue_request_nowait(self, request):
         self.pending_request_ids.add(request.request_id)
         self.expired_request_ids.pop(request.request_id, None)
         try:
@@ -939,7 +475,6 @@ class VisuraService:
             raise QueueFullError(f"Coda piena (max {self._queue_limit()})") from e
 
     async def _add_single(self, request_type: str, request, force: bool = False) -> SubmitResult:
-        """Generic add: check cache, then enqueue if needed."""
         cached = await self._check_cache(request_type, request, force=force)
         if cached is not None:
             return cached
@@ -948,41 +483,32 @@ class VisuraService:
             self._ensure_capacity(required_slots=1)
             await self._persist_single_request(request_type, request)
             self._enqueue_request_nowait(request)
-        logger.info(
-            f"Richiesta {request_type} {request.request_id} aggiunta alla coda (posizione: {self.request_queue.qsize()})"
-        )
+        logger.info("Richiesta %s %s aggiunta alla coda (posizione: %d)",
+                     request_type, request.request_id, self.request_queue.qsize())
         return SubmitResult(request_id=request.request_id)
 
     async def add_request(self, request: VisuraRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta alla coda (or returns cached)."""
         return await self._add_single("visura", request, force=force)
 
     async def add_intestati_request(self, request: VisuraIntestatiRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta intestati alla coda."""
         return await self._add_single("intestati", request, force=force)
 
     async def add_soggetto_request(self, request: VisuraSoggettoRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta soggetto alla coda."""
         return await self._add_single("soggetto", request, force=force)
 
     async def add_persona_giuridica_request(self, request: VisuraPersonaGiuridicaRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta persona giuridica alla coda."""
         return await self._add_single("persona_giuridica", request, force=force)
 
     async def add_generic_request(self, request: GenericSisterRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta generica alla coda."""
         return await self._add_single(request.search_type, request, force=force)
 
     async def add_ispezione_ipotecaria_request(self, request: IspezioneIpotecariaRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta ispezione ipotecaria alla coda."""
         return await self._add_single(f"ipotecaria_{request.tipo_ricerca}", request, force=force)
 
     async def add_elenco_immobili_request(self, request: ElencoImmobiliRequest, force: bool = False) -> str | SubmitResult:
-        """Aggiunge una richiesta elenco immobili alla coda."""
         return await self._add_single("elenco_immobili", request, force=force)
 
     async def add_requests_batch(self, requests: list[VisuraRequest], force: bool = False) -> list[str | SubmitResult]:
-        """Accoda più richieste in modo atomico lato producer."""
         if not requests:
             return []
 
@@ -1006,18 +532,21 @@ class VisuraService:
                 for request in to_enqueue:
                     self._enqueue_request_nowait(request)
             for request in to_enqueue:
-                logger.info(f"Richiesta visura {request.request_id} aggiunta alla coda")
+                logger.info("Richiesta visura %s aggiunta alla coda", request.request_id)
 
         return results
 
+    # ------------------------------------------------------------------
+    # Response query
+    # ------------------------------------------------------------------
+
     async def get_response(self, request_id: str) -> Optional[VisuraResponse]:
-        """Ottiene la risposta per un request_id"""
         response = self.response_store.get(request_id)
         if response is None:
             try:
                 record = await load_stored_response(request_id)
             except Exception as e:
-                logger.warning(f"Errore lettura risposta da database per {request_id}: {e}")
+                logger.warning("Errore lettura risposta da database per %s: %s", request_id, e)
                 record = None
             if record is not None:
                 response = self._response_from_db_record(record)
@@ -1039,8 +568,11 @@ class VisuraService:
             return "expired"
         return "not_found"
 
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
+
     async def shutdown(self):
-        """Chiude il servizio (senza logout graceful)"""
         auth_task = getattr(self, "_auth_task", None)
         if auth_task and not auth_task.done():
             auth_task.cancel()
@@ -1052,10 +584,8 @@ class VisuraService:
         await self.browser_manager.close()
 
     async def graceful_shutdown(self):
-        """Chiude il servizio con logout graceful"""
         logger.info("Iniziando graceful shutdown del servizio...")
 
-        # Cancel background auth if still running
         auth_task = getattr(self, "_auth_task", None)
         if auth_task and not auth_task.done():
             auth_task.cancel()
