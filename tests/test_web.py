@@ -443,3 +443,228 @@ async def test_web_result_detail_workflow(monkeypatch):
     doc_sections = [s for s in result["sections"] if s["kind"] == "downloaded_docs"]
     assert len(doc_sections) == 1
     assert doc_sections[0]["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# /web/workflows routes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_web_workflows_list(monkeypatch):
+    """Workflows list page renders runs with step counts."""
+    request = _fake_request()
+
+    async def _find_runs(**kwargs):
+        return [
+            {
+                "workflow_id": "wf_test_001",
+                "preset": "due-diligence",
+                "status": "completed",
+                "provincia": "Ravenna",
+                "comune": "RAVENNA",
+                "foglio": "101",
+                "particella": "2",
+                "tipo_catasto": "F",
+                "total_steps": 5,
+                "completed_steps": 5,
+                "created_at": "2026-04-12T12:00:00",
+                "updated_at": "2026-04-12T12:05:00",
+            },
+            {
+                "workflow_id": "wf_test_002",
+                "preset": "intestati",
+                "status": "partial",
+                "provincia": "Roma",
+                "comune": "ROMA",
+                "foglio": "1",
+                "particella": "50",
+                "tipo_catasto": "T",
+                "total_steps": 3,
+                "completed_steps": 1,
+                "created_at": "2026-04-12T13:00:00",
+                "updated_at": "2026-04-12T13:01:00",
+            },
+        ]
+
+    monkeypatch.setattr(web, "find_workflow_runs", _find_runs)
+    monkeypatch.setattr(web, "_get_auth_status", lambda: {"state": "ready", "mode": "local", "message": "ok"})
+
+    resp = await web.web_workflows(request, user=None, status=None, limit=50, offset=0)
+    ctx = resp["context"]
+    assert len(ctx["runs"]) == 2
+    assert ctx["runs"][0]["workflow_id"] == "wf_test_001"
+    assert ctx["runs"][0]["created_at_display"] == "2026-04-12 12:00"
+    assert ctx["runs"][1]["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_web_workflows_list_status_filter(monkeypatch):
+    """Workflows list page passes status filter."""
+    request = _fake_request()
+    captured_kwargs = {}
+
+    async def _find_runs(**kwargs):
+        captured_kwargs.update(kwargs)
+        return []
+
+    monkeypatch.setattr(web, "find_workflow_runs", _find_runs)
+    monkeypatch.setattr(web, "_get_auth_status", lambda: {"state": "unavailable", "mode": "local", "message": "n/a"})
+
+    await web.web_workflows(request, user=None, status="completed", limit=10, offset=0)
+    assert captured_kwargs["status"] == "completed"
+    assert captured_kwargs["limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_web_workflow_detail_renders(monkeypatch):
+    """Dedicated workflow detail page renders step sections."""
+    request = _fake_request()
+
+    async def _get_workflow_record(_id):
+        return {
+            "request_id": "wf_detail_001",
+            "request_type": "workflow:due-diligence",
+            "tipo_catasto": "F",
+            "provincia": "Ravenna",
+            "comune": "RAVENNA",
+            "foglio": "101",
+            "particella": "2",
+            "sezione": None,
+            "subalterno": None,
+            "cost_text": None,
+            "cost_value": None,
+            "requested_at": "2026-04-12T12:00:00",
+            "responded_at": "2026-04-12T12:05:00",
+            "success": True,
+            "status": "completed",
+            "data": {
+                "steps": [
+                    {"step": "visura", "status": "completed", "data": {"immobili": [{"Foglio": "101"}]}},
+                ],
+                "total_results": 1,
+            },
+            "error": None,
+            "page_visits": [],
+        }
+
+    async def _get_docs(_id, **kwargs):
+        return []
+
+    monkeypatch.setattr(web, "get_workflow_result_record", _get_workflow_record)
+    monkeypatch.setattr(web, "get_documents_for_response", _get_docs)
+
+    resp = await web.web_workflow_detail(request, "wf_detail_001", user=None)
+    ctx = resp["context"]
+    assert resp["template"] == "sister/workflow_detail.html"
+    result = ctx["result"]
+    assert result["status"] == "completed"
+    assert result["requested_at_display"] == "2026-04-12 12:00"
+    step_sections = [s for s in result["sections"] if s["kind"] == "workflow_steps"]
+    assert len(step_sections) == 1
+
+
+@pytest.mark.asyncio
+async def test_web_workflow_detail_not_found(monkeypatch):
+    """Workflow detail returns 404 for unknown workflow."""
+    request = _fake_request()
+
+    async def _get_workflow_record(_id):
+        return None
+
+    monkeypatch.setattr(web, "get_workflow_result_record", _get_workflow_record)
+
+    resp = await web.web_workflow_detail(request, "wf_missing", user=None)
+    assert resp["context"]["result"] is None
+
+
+# ---------------------------------------------------------------------------
+# Status filter edge cases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_web_results_status_filter_passed_to_count(monkeypatch):
+    """Status filter is passed to both find and count functions."""
+    request = _fake_request()
+    count_kwargs = {}
+
+    async def _find(**kwargs):
+        return []
+
+    async def _count(**kwargs):
+        return {"total_requests": 0, "total_responses": 0, "successful": 0, "failed": 0, "partial": 0, "pending": 0}
+
+    async def _count_total(**kwargs):
+        count_kwargs.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(web, "find_result_rows", _find)
+    monkeypatch.setattr(web, "count_result_rows", _count)
+    monkeypatch.setattr(web, "count_total_result_rows", _count_total)
+
+    await web.web_results(request, user=None, status="failed", source="workflow")
+    assert count_kwargs["status"] == "failed"
+    assert count_kwargs["source"] == "workflow"
+
+
+# ---------------------------------------------------------------------------
+# count_total_result_rows
+# ---------------------------------------------------------------------------
+
+
+class TestCountTotalResultRows:
+    """SQL-based filtered counting."""
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_for_missing_db(self, tmp_path, monkeypatch):
+        from sister import database
+        monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "nonexistent.sqlite"))
+        result = await database.count_total_result_rows()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_invalid_status_ignored(self, monkeypatch):
+        from sister import database
+        # Invalid status should be normalized to None (no filter)
+        total_all = await database.count_total_result_rows()
+        total_bogus = await database.count_total_result_rows(status="bogus_status")
+        assert total_all == total_bogus
+
+    @pytest.mark.asyncio
+    async def test_invalid_source_ignored(self, monkeypatch):
+        from sister import database
+        total_all = await database.count_total_result_rows()
+        total_bogus = await database.count_total_result_rows(source="bogus_source")
+        assert total_all == total_bogus
+
+
+# ---------------------------------------------------------------------------
+# is_db_writable
+# ---------------------------------------------------------------------------
+
+
+class TestIsDbWritable:
+    """Database write-mode detection."""
+
+    def test_writable_path(self, tmp_path):
+        from sister import database
+        db_file = tmp_path / "test.sqlite"
+        db_file.touch()
+        old = database._db_writable
+        database._db_writable = None  # reset cache
+        database.DB_PATH = str(db_file)
+        try:
+            assert database.is_db_writable() is True
+        finally:
+            database._db_writable = old
+
+    def test_nonexistent_writable_parent(self, tmp_path):
+        from sister import database
+        old = database._db_writable
+        database._db_writable = None
+        database.DB_PATH = str(tmp_path / "new.sqlite")
+        try:
+            assert database.is_db_writable() is True
+        finally:
+            database._db_writable = old
