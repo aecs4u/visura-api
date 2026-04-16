@@ -567,25 +567,30 @@ class VisuraService:
         by navigating to the SISTER logout URL.
         """
         max_retries = 5
+        last_error = ""
         for attempt in range(1, max_retries + 1):
             try:
-                logger.info("Autenticazione browser in corso (tentativo %d/%d)...", attempt, max_retries)
+                if attempt == 1:
+                    logger.info("Autenticazione browser in corso...")
+                else:
+                    logger.info("Autenticazione browser: tentativo %d/%d", attempt, max_retries)
                 await self._do_auth()
                 return
             except Exception as e:
-                err_msg = str(e)
-                logger.error("Autenticazione fallita (tentativo %d/%d): %s", attempt, max_retries, err_msg)
+                last_error = str(e)
+                logger.debug("Auth attempt %d/%d failed: %s", attempt, max_retries, last_error)
 
-                # If session locked, try to close it via logout URL
-                if "active session" in err_msg.lower() or "già in sessione" in err_msg.lower():
+                if "active session" in last_error.lower() or "già in sessione" in last_error.lower():
                     await self._try_close_stale_session()
 
                 if attempt < max_retries:
                     wait = 15 * attempt
-                    logger.info("Riprovo tra %ds...", wait)
                     await asyncio.sleep(wait)
-        self._auth_failed_message = f"Authentication failed after {max_retries} attempts"
-        logger.error("Autenticazione browser fallita dopo %d tentativi — le query browser non funzioneranno", max_retries)
+        self._auth_failed_message = f"Authentication failed after {max_retries} attempts: {last_error}"
+        logger.error(
+            "Browser authentication failed after %d attempts: %s — queries will not work",
+            max_retries, last_error,
+        )
 
     async def _try_close_stale_session(self):
         """Attempt to close a stale SISTER session by hitting the logout URL."""
@@ -650,7 +655,7 @@ class VisuraService:
 
                     # Wait for auth to be ready before processing browser requests
                     if not self.auth_ready:
-                        logger.info("In attesa dell'autenticazione browser...")
+                        logger.debug("Waiting for browser authentication before processing request")
                         for _ in range(60):  # wait up to 5 minutes
                             if self.auth_ready:
                                 break
@@ -802,16 +807,19 @@ class VisuraService:
             self.expired_request_ids.pop(oldest_request_id, None)
 
     async def _store_response(self, response: VisuraResponse):
+        from .database import is_db_writable
+
         self.response_store[response.request_id] = response
         self.expired_request_ids.pop(response.request_id, None)
         self._cleanup_response_store()
-        await save_response(
-            request_id=response.request_id,
-            success=response.success,
-            tipo_catasto=response.tipo_catasto,
-            data=response.data,
-            error=response.error,
-        )
+        if is_db_writable():
+            await save_response(
+                request_id=response.request_id,
+                success=response.success,
+                tipo_catasto=response.tipo_catasto,
+                data=response.data,
+                error=response.error,
+            )
 
     @staticmethod
     def _response_from_db_record(record: dict) -> VisuraResponse:
@@ -860,6 +868,10 @@ class VisuraService:
     async def _persist_single_request(
         self, request_type: str, request: VisuraRequest | VisuraIntestatiRequest | VisuraSoggettoRequest
     ):
+        from .database import is_db_writable
+
+        if not is_db_writable():
+            return
         params = self._request_cache_params(request_type, request)
         cache_key = compute_cache_key(request_type, **params)
         try:
@@ -876,10 +888,14 @@ class VisuraService:
                 cache_key=cache_key,
             )
         except Exception as e:
-            logger.error(f"Errore persistenza richiesta {request.request_id}: {e}")
+            logger.error("Errore persistenza richiesta %s: %s", request.request_id, e)
             raise RuntimeError("Errore durante il salvataggio della richiesta") from e
 
     async def _persist_request_batch(self, requests: list[VisuraRequest]):
+        from .database import is_db_writable
+
+        if not is_db_writable():
+            return
         rows = [
             {
                 "request_id": request.request_id,
@@ -897,7 +913,7 @@ class VisuraService:
         try:
             await save_requests_batch(rows)
         except Exception as e:
-            logger.error(f"Errore persistenza batch richieste ({len(requests)} item): {e}")
+            logger.error("Errore persistenza batch richieste (%d item): %s", len(requests), e)
             raise RuntimeError("Errore durante il salvataggio delle richieste") from e
 
     def _queue_limit(self) -> int:

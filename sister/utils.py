@@ -1361,9 +1361,11 @@ async def _save_documents_to_db(documents: list[dict]) -> None:
     """Persist downloaded documents to the visura_documents table, skipping duplicates."""
     import json
     from sqlalchemy import text
-    from .database import _get_session_factory
+    from .database import _get_session_factory, is_db_writable
     from .db_models import VisuraDocumentDB
 
+    if not is_db_writable():
+        return
     session_factory = _get_session_factory()
     saved = 0
     skipped = 0

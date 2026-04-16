@@ -794,11 +794,12 @@ async def find_result_rows(
 
 async def cleanup_old_responses(ttl_seconds: int) -> int:
     """Delete responses older than ttl_seconds. Returns count of deleted rows."""
+    if not is_db_writable():
+        return 0
     session_factory = _get_session_factory()
     async with session_factory() as session:
         cutoff = datetime.now() - timedelta(seconds=ttl_seconds)
 
-        # Find expired responses
         stmt = select(VisuraResponseDB).where(VisuraResponseDB.created_at < cutoff)
         result = await session.execute(stmt)
         expired = result.scalars().all()
@@ -808,7 +809,6 @@ async def cleanup_old_responses(ttl_seconds: int) -> int:
             await session.delete(resp)
 
         if deleted:
-            # Also delete orphaned requests
             orphan_stmt = select(VisuraRequestDB).where(
                 VisuraRequestDB.created_at < cutoff,
                 ~VisuraRequestDB.request_id.in_(
@@ -820,10 +820,7 @@ async def cleanup_old_responses(ttl_seconds: int) -> int:
                 await session.delete(req)
 
         await session.commit()
-
-        if is_db_writable():
-            await session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-
+        await session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
         return deleted
 
 

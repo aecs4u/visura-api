@@ -260,8 +260,10 @@ def _build_aggregate(step_results: list[dict]) -> dict:
 
 async def _save_workflow_run(workflow_id: str, preset: str, input_data: dict, status: str = "running"):
     """Persist a workflow run to the database."""
-    from .database import _get_session_factory
+    from .database import _get_session_factory, is_db_writable
 
+    if not is_db_writable():
+        return
     async with _get_session_factory()() as session:
         from sqlalchemy import text
         await session.execute(text(
@@ -275,8 +277,10 @@ async def _save_workflow_run(workflow_id: str, preset: str, input_data: dict, st
 async def _save_workflow_step(workflow_id: str, step_key: str, status: str,
                               result_json: Optional[dict] = None, error: Optional[str] = None):
     """Persist a workflow step result."""
-    from .database import _get_session_factory
+    from .database import _get_session_factory, is_db_writable
 
+    if not is_db_writable():
+        return
     now = datetime.now().isoformat()
     async with _get_session_factory()() as session:
         from sqlalchemy import text
@@ -314,8 +318,10 @@ async def _load_completed_steps(workflow_id: str) -> dict[str, dict]:
 
 async def _finish_workflow_run(workflow_id: str, status: str, output_json: Optional[dict] = None):
     """Mark a workflow run as completed/failed."""
-    from .database import _get_session_factory
+    from .database import _get_session_factory, is_db_writable
 
+    if not is_db_writable():
+        return
     async with _get_session_factory()() as session:
         from sqlalchemy import text
         await session.execute(text(
@@ -325,9 +331,7 @@ async def _finish_workflow_run(workflow_id: str, status: str, output_json: Optio
             "oj": json.dumps(output_json, default=str) if output_json else None,
             "now": datetime.now().isoformat()})
         await session.commit()
-        from .database import is_db_writable
-        if is_db_writable():
-            await session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        await session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
 
 
 
