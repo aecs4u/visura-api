@@ -42,6 +42,7 @@ from .db_models import (
     CadastralSubject,
     DocumentMetadata,
     FeedbackConfig,
+    FeedbackConfigItem,
     FeedbackUnsubscribe,
     GeographicPlace,
     OwnershipRight,
@@ -74,6 +75,9 @@ from .visura_xml_models import (
 # created by the opendata project (see opendata/models/workflow.py and the
 # corresponding Alembic migration). Sister queries them via raw SQL but does
 # not define or create the schema.
+# FeedbackConfig / FeedbackConfigItem / FeedbackUnsubscribe are the exception:
+# the model classes now live in aecs4u_domain.feedback (shared with opendata),
+# but sister still owns creating them in its own standalone SQLite DB.
 _SISTER_TABLES = [
     CadastralLocation.__table__,  # no FK deps — must be first
     GeographicPlace.__table__,
@@ -100,6 +104,7 @@ _SISTER_TABLES = [
     OwnershipMutation.__table__,
     PropertyOwner.__table__,
     FeedbackConfig.__table__,
+    FeedbackConfigItem.__table__,
     FeedbackUnsubscribe.__table__,
     CadastralQuery.__table__,
     CadastralInspection.__table__,
