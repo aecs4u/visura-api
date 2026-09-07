@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any, ClassVar, Optional
 
 import sqlalchemy as sa
+from aecs4u_domain.feedback import FeedbackConfig, FeedbackConfigItem, FeedbackUnsubscribe
 from sqlalchemy import JSON as SA_JSON
 from sqlalchemy import Column, Index, Text, UniqueConstraint
 from sqlmodel import Field, Relationship, SQLModel
@@ -363,50 +364,6 @@ class DocumentMetadata(SQLModel, table=True):
         "SezCensuaria": "section",  # Terreni
         "TipoCatasto": "cadastre_type",
     }
-
-
-class FeedbackConfig(SQLModel, table=True):
-    __tablename__ = "feedback_config"
-
-    id: int = Field(default=1, primary_key=True)
-    cc_emails: list[str] = Field(
-        default_factory=list, sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]")
-    )
-    bcc_emails: list[str] = Field(
-        default_factory=list, sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]")
-    )
-    invitation_subject: str = Field(
-        default="Il tuo feedback è importante",
-        sa_column=sa.Column(sa.Text, nullable=False, server_default="Il tuo feedback è importante"),
-    )
-    invitation_intro: str = Field(default="", sa_column=sa.Column(sa.Text, nullable=False, server_default=""))
-    invitation_bullets: list[str] = Field(
-        default_factory=list, sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]")
-    )
-    invitation_cta_text: str = Field(
-        default="Lascia il tuo feedback →",
-        sa_column=sa.Column(sa.Text, nullable=False, server_default="Lascia il tuo feedback →"),
-    )
-    invitation_privacy_note: str = Field(default="", sa_column=sa.Column(sa.Text, nullable=False, server_default=""))
-    invitation_signature: str = Field(default="", sa_column=sa.Column(sa.Text, nullable=False, server_default=""))
-    invitation_unsub_text: str = Field(
-        default="Non vuoi più ricevere queste email?",
-        sa_column=sa.Column(sa.Text, nullable=False, server_default="Non vuoi più ricevere queste email?"),
-    )
-    invitation_unsub_link_text: str = Field(
-        default="Disiscriviti qui", sa_column=sa.Column(sa.Text, nullable=False, server_default="Disiscriviti qui")
-    )
-    grace_period_days: int = Field(default=30, sa_column=sa.Column(sa.Integer, nullable=False, server_default="30"))
-
-
-class FeedbackUnsubscribe(SQLModel, table=True):
-    __tablename__ = "feedback_unsubscribes"
-
-    email: str = Field(primary_key=True)
-    unsubscribed_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-        sa_column=sa.Column(sa.DateTime(timezone=True), nullable=False),
-    )
 
 
 OWNER_SUBJECT_FIELD_MAP = {

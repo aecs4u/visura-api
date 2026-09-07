@@ -15,10 +15,12 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import delete
+from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
 from .database import _get_session_factory
-from .db_models import FeedbackConfig, FeedbackUnsubscribe
+from .db_models import FeedbackConfig, FeedbackConfigItem, FeedbackUnsubscribe
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/v1/admin/feedback", tags=["feedback-admin"])
@@ -56,12 +58,12 @@ def _verify_unsub_token(token: str) -> str | None:
 async def _get_config() -> FeedbackConfig:
     session_factory = _get_session_factory()
     async with session_factory() as session:
-        row = await session.get(FeedbackConfig, 1)
+        row = await session.get(FeedbackConfig, 1, options=[selectinload(FeedbackConfig.items)])
         if row is None:
             row = FeedbackConfig(id=1)
             session.add(row)
             await session.commit()
-            await session.refresh(row)
+            row = await session.get(FeedbackConfig, 1, options=[selectinload(FeedbackConfig.items)])
         return row
 
 
@@ -126,11 +128,8 @@ async def update_feedback_config(body: FeedbackConfigPayload, _: None = None):
         cfg = await session.get(FeedbackConfig, 1)
         if cfg is None:
             cfg = FeedbackConfig(id=1)
-        cfg.cc_emails = [str(e) for e in body.cc_emails]
-        cfg.bcc_emails = [str(e) for e in body.bcc_emails]
         cfg.invitation_subject = body.invitation_subject
         cfg.invitation_intro = body.invitation_intro
-        cfg.invitation_bullets = body.invitation_bullets
         cfg.invitation_cta_text = body.invitation_cta_text
         cfg.invitation_privacy_note = body.invitation_privacy_note
         cfg.invitation_signature = body.invitation_signature
@@ -138,6 +137,17 @@ async def update_feedback_config(body: FeedbackConfigPayload, _: None = None):
         cfg.invitation_unsub_link_text = body.invitation_unsub_link_text
         cfg.grace_period_days = max(1, body.grace_period_days)
         session.add(cfg)
+
+        # cc_emails / bcc_emails / invitation_bullets are computed from
+        # FeedbackConfigItem rows, not plain columns — replace them wholesale.
+        await session.execute(delete(FeedbackConfigItem).where(FeedbackConfigItem.config_id == cfg.id))
+        for kind, values in (
+            ("cc_email", [str(e) for e in body.cc_emails]),
+            ("bcc_email", [str(e) for e in body.bcc_emails]),
+            ("invitation_bullet", body.invitation_bullets),
+        ):
+            for position, value in enumerate(values):
+                session.add(FeedbackConfigItem(config_id=cfg.id, kind=kind, position=position, value=value))
         await session.commit()
     return {"message": "Configurazione aggiornata."}
 
